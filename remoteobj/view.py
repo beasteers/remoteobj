@@ -1,4 +1,9 @@
 
+def _fmt_args(*a, **kw):
+    return ', '.join(
+        ['{!r}'.format(x) for x in a] +
+        ['{}={!r}'.format(k, v) for k, v in kw.items()])
+
 class View:
     '''Represents a set of operations that can be captured, pickled, and
     applied to a remote object.
@@ -34,10 +39,9 @@ class View:
             elif kind == '[]=':
                 x = '{}[{}] = {}'.format(x, k[0], k[1])
             elif kind == '()':
-                args = ', '.join(
-                    ['{!r}'.format(a) for a in k[0]] +
-                    ['{}={!r}'.format(ka, a) for ka, a in k[1].items()])
-                x = '{}({})'.format(x, args)
+                x = '{}({})'.format(x, _fmt_args(*k[0], **k[1]))
+            elif kind == 'f()':
+                x = '{}({})'.format(k[0].__name__, _fmt_args(x, *k[1], **k[2]))
         return '({})'.format(x)
 
     def resolve_view(self, obj):
@@ -56,6 +60,8 @@ class View:
                 setattr(obj, k[0], k[1])
             elif kind == '[]=':
                 obj[k[0]] = k[1]
+            elif kind == 'f()':
+                obj = k[0](obj, *k[1], **k[2])
         return obj
 
     def _extend(self, *keys, **kw):
@@ -68,9 +74,8 @@ class View:
             raise AttributeError(name)
         return self._extend(('.', name))
 
-    def __setattr__(self, name, value):
-        if name.startswith('_') or name in self.__dict__ or name in self.__class__.__dict__:
-            return super().__setattr__(name, value)
+    def _setattr(self, name, value):
+        '''Append a x.y = z op'''
         if self._frozen:
             raise AttributeError(name)
         return self._extend(('.=', (name, value)), frozen=True)
@@ -81,7 +86,7 @@ class View:
             raise KeyError(index)
         return self._extend(('[]', index))
 
-    def __setitem__(self, index, value):
+    def _setitem(self, index, value):
         '''Append a x[1] op.'''
         if self._frozen:
             raise KeyError(index)
@@ -92,3 +97,15 @@ class View:
         if self._frozen:
             raise TypeError(f'{self} is frozen and is not callable.')
         return self._extend(('()', (a, kw)))
+
+    def passto(self, func, *a, **kw):
+        return self._extend(('f()', (func, a, kw)))
+
+    @classmethod
+    def attrs_(self, *keys):
+        '''Access nested attributes using strings.
+        e.g.
+            x.attrs_('adsf') == x.asdf
+            x.attrs_('adsf.zxcv', 'sdfg', 'sdfg.sfg') == x.adsf.zxcv.sdfg.sdfg.sfg
+        '''
+        return self._extend(*(('.', k) for ks in keys for k in ks.split('.')))

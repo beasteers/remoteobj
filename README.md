@@ -3,8 +3,7 @@ Interacting with objects across processes.
 
 This uses multiprocessing pipes to send messages and operations from the main process to the remote process.
 
-Basically this lets do things like call `.close()` or `.pause()`, or `.ready` on an object that was sent to another process.
-
+Basically this lets do things like call `.close()` or `.pause()`, or `.ready` on an object that was sent to another process. But it also supports more than that.
 
 ## Install
 
@@ -18,9 +17,11 @@ pip install remoteobj
 import remoteobj
 
 # building some arbitrary object
-obj = []
-obj.something = 5
-obj.another = []
+class Idk(list):
+    something = 5
+    another = []
+
+obj = Idk()
 
 # creating a remote proxy to interact with
 # we want to make sure that the proxy gets
@@ -34,10 +35,18 @@ r_obj = obj.remote = remoteobj.Proxy(obj)
 
 # call a method
 r_obj.append(5)
+# now the remote object has 5 appended to it
+assert r_obj.passto(len) == 1
+# NOTE: this is equivalent to len(obj)
+
+
 # getting an attribute returns a proxy so you can chain
 assert isinstance(r_obj.another.append, remoteobj.Proxy)
+
 # calling will automatically resolve a proxy
 r_obj.another.append(6)
+# now another == [6]
+
 # you can access keys, but we still allow chaining
 # so they're proxies too
 assert isinstance(r_obj[0], remoteobj.Proxy)
@@ -45,11 +54,11 @@ assert isinstance(r_obj.another[0], remoteobj.Proxy)
 
 # to make the request and get the value, do
 
-print(remoteobj.get( r_obj[0] ))
+assert remoteobj.get( r_obj[0] ) == 5
 # or more concisely
-print(r_obj[0].__)
-# or if you prefer
-print(r_obj[0].get_())
+assert r_obj[0].__ == 5
+# or if you prefer a less witch-y way
+assert r_obj[0].get_() == 5
 
 # you can even set keys and attributes on remote objects
 r_obj[0] = 6
@@ -70,6 +79,10 @@ def run(obj):
             for x, y in zip(obj, obj.another):
                 value -= y / x * obj.something
             time.sleep(0.4)
+    # after exiting, listening is set to false,
+    # clients will fail or return their default
+    # immediately because we have notified that
+    # we will not be processing any more requests.
 
 
 # or if you want(/need) to have message handling in the
@@ -91,16 +104,43 @@ These are the operations that a remote view can handle, which covers the main wa
 NOTE: Any operation that returns a proxy can be chained.
 
  - **call** (`obj(*a, **kw)`): retrieves return value.
-    - to return a proxy instead, do either `Proxy(obj, proxy_call=True)` to get all as proxies or `obj.method(_proxy=True)` for a one-time thing
+    - to return a proxy instead, do either `Proxy(obj, eager_proxy=True)` to get all as proxies or `obj.method(_proxy=True)` for a one-time thing
  - **getitem** (`obj[key]`): returns proxy
  - **getattr** (`obj.attr`): returns proxy
  - **setitem** (`obj[key] = value`): evaluates
  - **setattr** (`obj.attr = value`): evaluates
+ - **passto** (`value(obj)`): pass object to a function
+    - e.g. `obj.passto(str)` is equivalent to `str(obj)`
+    - you can also pass args: `obj.passto(func, *a, **kw)`
 
 To resolve a proxy, you can do one of three equivalent styles:
  - `remoteobj.get(obj.attr, default=False)` - makes it clearer that `obj.attr` is being sent to the main process
  - `obj.attr.get_(default='asdf')` - access via chaining - convenient, somewhat clear
  - `obj.attr.__` - an attempt at a minimalist interface, doesn't handle default value, not super clear. it's the easiest on the eyes once you know what it means, but I agree that the obscurity is a bit of an issue.
+
+## How it works
+
+We override basic python operators so that they return an object that represents a chain of operations (`Proxy`, `View` objects).
+ - `View` objects represents a chain of operations
+ - `Proxy` objects represents a chain of operations linked to an object.
+
+When we go to resolve a chain of operations, we
+ - first acquire a lock so that the listening state can't change and no other requests can be made at the same time.
+ - check if the remote instance is listening
+ - we send the set of operations over a pipe and then wait for the value to come out the other side
+ - once it returns we check the return values, raise any exception, and return.
+
+On the remote side, we:
+ - poll the connection checking for op requests and once we find one:
+ - acquire a write lock
+ - evaluate the view on the proxy object
+ - handle exceptions then place the result and exception in the pipe to be sent back
+
+If there is no listening process, either a default value will be returned (if you provided one via `get_(default=False)`) or a `RuntimeError` will be raised.
+
+It is useful to call `proxy.wait_until_listening()` while the remote process is starting up so that you don't get a `RuntimeError` due to the listener not having started up yet.
+
+If a remote object gets called from the same process as the listening process then it will bypass the pipes and evaluate it directly. This means that if you use threads instead of processes, no data will be sent over pipes.
 
 ## Full Example
 

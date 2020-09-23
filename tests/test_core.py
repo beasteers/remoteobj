@@ -51,86 +51,95 @@ def _run_remote_bg(obj, event):  # some remote job
 def test_remote():
     obj = ObjectB()
 
-    assert obj.remote.listening == False
-    event = mp.Event()
-    p = mp.Process(target=_run_remote, args=(obj, event), daemon=True)
-    p.start()
-    obj.remote.wait_until_listening()
-    assert obj.remote.listening == True
+    assert obj.remote._listening == False
+    with remoteobj.util.dummy_listener(obj):
+        assert obj.remote._listening == True
 
-    X = obj.x
-    i_l, i_r = 0, 0
+        X = obj.x
+        i_l, i_r = 0, 0
 
-    # attribute access
-    assert obj.x == X*(2**i_l)
-    assert obj.remote.x.get_() == X*(2**i_r)
+        # attribute access
+        assert obj.x == X*(2**i_l)
+        assert obj.remote.x.get_() == X*(2**i_r)
 
-    # local update
-    obj.asdf()
-    i_l += 1
-    assert obj.x == X*(2**i_l)
-    assert obj.remote.x.get_() == X*(2**i_r)
+        # local update
+        obj.asdf()
+        i_l += 1
+        assert obj.x == X*(2**i_l)
+        assert obj.remote.x.get_() == X*(2**i_r)
 
-    # remote update
-    obj.remote.asdf()
-    i_r += 1
-    assert obj.x == X*(2**i_l)
-    assert obj.remote.x.get_() == X*(2**i_r)
+        # remote update
+        obj.remote.asdf()
+        i_r += 1
+        assert obj.x == X*(2**i_l)
+        assert obj.remote.x.get_() == X*(2**i_r)
 
-    # remote property
-    assert obj.zxcv == X*(2**i_l)/10
-    assert obj.remote.zxcv.get_() == X*(2**i_r)/10
+        # remote property
+        assert obj.zxcv == X*(2**i_l)/10
+        assert obj.remote.zxcv.get_() == X*(2**i_r)/10
 
-    assert super(type(obj), obj).zxcv == X*(2**i_l)*2/10
-    assert obj.remote.super.zxcv.get_() == X*(2**i_r)*2/10
+        assert super(type(obj), obj).zxcv == X*(2**i_l)*2/10
+        assert obj.remote.super.zxcv.get_() == X*(2**i_r)*2/10
 
-    # remote update
-    i_r += 3
-    assert obj.remote.asdf().asdf().asdf() is obj.remote
-    assert obj.x == X*(2**i_l)
-    assert obj.remote.x.get_() == X*(2**i_r)
+        # remote update
+        i_r += 3
+        assert obj.remote.asdf().asdf().asdf() is obj.remote
+        assert obj.x == X*(2**i_l)
+        assert obj.remote.x.get_() == X*(2**i_r)
 
-    # terminate
+        # terminate
 
-    # local terminate
-    obj.terminate()
-    assert obj.remote.term.get_() == False
-    assert obj.term == True
+        # local terminate
+        obj.terminate()
+        assert obj.remote.term.get_() == False
+        assert obj.term == True
 
-    obj.start()
-    assert obj.remote.term.get_() == False
-    assert obj.term == False
+        obj.start()
+        assert obj.remote.term.get_() == False
+        assert obj.term == False
 
-    # remote terminate
-    obj.remote.terminate()
-    assert obj.remote.term.get_() == True
-    assert obj.term == False
+        # remote terminate
+        obj.remote.terminate()
+        assert obj.remote.term.get_() == True
+        assert obj.term == False
 
-    obj.remote.start()
-    assert obj.remote.term.get_() == False
-    assert obj.term == False
+        obj.remote.start()
+        assert obj.remote.term.get_() == False
+        assert obj.term == False
 
-    # setattr
+        # setattr
 
-    # remote setattr
-    obj.remote.term = True
-    assert obj.remote.term.get_() == True
-    assert obj.term == False
+        # remote setattr
+        obj.remote.term = True
+        assert obj.remote.term.get_() == True
+        assert obj.term == False
 
-    obj.remote.term = False
-    assert obj.remote.term.get_() == False
-    assert obj.term == False
+        obj.remote.term = False
+        assert obj.remote.term.get_() == False
+        assert obj.term == False
 
-    # local setattr
-    obj.term = True
-    assert obj.remote.term.get_() == False
-    assert obj.term == True
+        # local setattr
+        obj.term = True
+        assert obj.remote.term.get_() == False
+        assert obj.term == True
 
-    obj.term = False
-    assert obj.remote.term.get_() == False
-    assert obj.term == False
+        obj.term = False
+        assert obj.remote.term.get_() == False
+        assert obj.term == False
 
-    assert p.is_alive()
-    event.set()
-    p.join()
-    assert not obj.remote.listening
+        # passto
+
+        x = obj.remote.passto(str)
+        assert x == '<A x={} terminated={}>'.format(X*(2**i_r), False)
+
+    assert not obj.remote._listening
+
+
+# def test_remote_clients():
+#     '''Determine if the remote instance can get data.'''
+
+# def test_dueling_threads():
+#     '''Determine if two threads making requests at the same time causes problems.'''
+
+# def test_remote_exception():
+#     '''Test that remote exceptions are thrown and that the original traceback is displayed.'''
