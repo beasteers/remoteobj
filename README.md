@@ -120,7 +120,9 @@ p.start()
 p.join()
 catch.raise_any('hi')  # will raise hi
 # or
-catch.raise_any()  # will raise exceptions in the default context
+catch.raise_any()  # will raise any exception
+# or
+catch.raise_any(None)  # will raise any exception in the default context
 ```
 #### Local Exceptions
 We can use the same syntax and context mechanics without the inter-process communication to catch errors locally.
