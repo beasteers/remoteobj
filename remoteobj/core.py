@@ -275,7 +275,7 @@ class LocalExcept:
     back to be raised properly in the main process.'''
     def __init__(self, *types, raises=False, catch_once=True):
         self._local, self._remote = mp.Pipe()
-        self.types = types or (BaseException,)
+        self.types = types or (Exception,)
         self.raises = raises
         self.catch_once = catch_once
         self._groups = {}

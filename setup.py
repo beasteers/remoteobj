@@ -5,7 +5,7 @@ NAME = 'remoteobj'
 
 setuptools.setup(
     name=NAME,
-    version='0.1.3',
+    version='0.1.4',
     description='',
     long_description=open('README.md').read().strip(),
     long_description_content_type='text/markdown',
