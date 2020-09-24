@@ -251,8 +251,12 @@ def _raise_stuff(catch):
             with catch(types=TypeError):
                 raise AttributeError('e')
 
+        with catch:
+            with catch(catch_once=False, raises=True):
+                raise TypeError('q')
+
 ALL_RAISED_ = {
-    None: [AttributeError('a'), KeyError('a'), AttributeError('e')],
+    None: [AttributeError('a'), KeyError('a'), AttributeError('e'), TypeError('q'), TypeError('q')],
     'init': [ValueError('b')],
     'process': [IndexError('c')]*5,
     'finish': [RuntimeError('d')],
@@ -276,7 +280,7 @@ def test_remote_named_exceptions():
     assert len(catch.all()) == N_RAISED_
 
 def test_local_exceptions():
-    catch = remoteobj.LocalExcept()
+    catch = remoteobj.LocalExcept(raises=False)
 
     _raise_stuff(catch)
     print(catch)

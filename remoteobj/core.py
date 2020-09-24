@@ -273,10 +273,11 @@ class Proxy(View):
 class LocalExcept:
     '''Catch exceptions in a remote process with their traceback and send them
     back to be raised properly in the main process.'''
-    def __init__(self, *types, raises=False):
+    def __init__(self, *types, raises=False, catch_once=True):
         self._local, self._remote = mp.Pipe()
         self.types = types or (BaseException,)
         self.raises = raises
+        self.catch_once = catch_once
         self._groups = {}
         self._excs = {}
 
@@ -293,25 +294,26 @@ class LocalExcept:
             )
         )
 
-    def __call__(self, name=None, raises=None, types=()):
+    def __call__(self, name=None, raises=None, types=None, catch_once=None):
         return _ExceptContext(
             self, name,
             self.raises if raises is None else raises,
-            self.types if not types else types)
+            self.types if types is None else types,
+            self.catch_once if catch_once is None else catch_once)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_val is not None and isinstance(exc_val, self.types):
-            self.set(exc_val)
-            return not self.raises
+        return self().__exit__(exc_type, exc_val, exc_tb)
 
-    def set(self, exc, name=None):
+    def set(self, exc, name=None, mark=True):
         if name not in self._groups:
             self._groups[name] = []
         self._groups[name].append(exc)
         self._excs[name] = exc
+        if mark:
+            exc.__remoteobj_caught__ = name
 
     def get(self, name=None):
         return self._excs.get(name)
@@ -319,8 +321,8 @@ class LocalExcept:
     def group(self, name=None):
         return self._groups.get(name)
 
-    def raise_any(self, name=None):
-        exc = self.get(name)
+    def raise_any(self, name=...):
+        exc = self.get(name) if name != ... else next(iter(self.all()), None)
         if exc is not None:
             raise exc
 
@@ -329,9 +331,9 @@ class LocalExcept:
 
 
 class Except(LocalExcept):
-    def __init__(self, *types, raises=False):
+    def __init__(self, *types, **kw):
         self._local, self._remote = mp.Pipe()
-        super().__init__(*types, raises=raises)
+        super().__init__(*types, **kw)
 
     def __str__(self):
         self.pull()
@@ -349,11 +351,11 @@ class Except(LocalExcept):
         self.pull()
         return super().all()
 
-    def set(self, exc, name=None):
+    def set(self, exc, name=None, mark=True):
         self._remote.send((
             RemoteException(exc) if exc is not None else None, name))
-
-
+        if mark:
+            exc.__remoteobj_caught__ = name
 
     def pull(self):
         '''Pull any exceptions through the pipe.'''
@@ -363,16 +365,17 @@ class Except(LocalExcept):
 
 
 class _ExceptContext:
-    def __init__(self, catch, name=None, raises=False, types=()):
+    def __init__(self, catch, name=None, raises=False, types=(), catch_once=True):
         self.catch = catch
         self.name = name
-        self.raises = raises
+        self.raises = raises or not catch_once
         self.types = types
+        self.catch_once = catch_once
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_val is not None and isinstance(exc_val, self.types):
-            self.catch.set(exc_val, self.name)
+            self.catch.set(exc_val, self.name, self.catch_once)
             return not self.raises

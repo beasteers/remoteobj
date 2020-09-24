@@ -97,30 +97,47 @@ def run(obj):
 
 ```
 #### Sending Exceptions
-Define an `Except` object - here we're attaching to `obj` for convenience, but handle it however you want.
+Sending exceptions back from another process is always such a pain because you have to deal with all of the inter-process communication scaffolding, setting up queues, etc.
 
-In your remote process use `catch_` as a context manager and any matching exceptions raised in that context will be pickled with its traceback and appended to its queue.
+The `Except` class lets you catch exceptions and add them to different named groups. This is useful if you need to separate out exceptions for setup errors, processing errors, or clean up errors.
+
+How it works: Define an `Except` object. In your remote process use `catch` as a context manager and any matching exceptions raised in that context will be pickled with its traceback and appended to its queue.
 
 ```python
 # define an exception handler
-obj.catch_ = remoteobj.Except()
+catch = remoteobj.Except()
 # or be more specific
-obj.catch_ = remoteobj.Except(ValueError, TypeError)
+catch = remoteobj.Except(ValueError, TypeError)
 
+def remote_process(catch):
+    with catch:
+        raise ValueError('!!!')
+    with catch('hi'):  # named exception contexts
+        raise TypeError('hi')
 
-def remote_process(obj):
-    with obj.catch_:
-        with obj.remote.background_listen():
-            time.sleep(1)
-            raise ValueError('!!!')
-
-p = mp.Process(target=remote_process, args=(obj,))
+p = mp.Process(target=remote_process, args=(catch,))
 p.start()
 p.join()
-obj.catch_.raise_any()
+catch.raise_any('hi')  # will raise hi
+# or
+catch.raise_any()  # will raise exceptions in the default context
 ```
+#### Local Exceptions
+We can use the same syntax and context mechanics without the inter-process communication to catch errors locally.
+```python
+# define an exception handler
+catch = remoteobj.LocalExcept(raises=True)
 
+try:
+    with catch:
+        raise ValueError('!!!')
+except:
+    with catch('hi', raises=False):
+        raise TypeError('hello')
 
+catch.raise_any('hi')
+catch.raise_any()
+```
 
 ## Operations
 These are the operations that a remote view can handle, which covers the main ways of accessing information from an object. Let me know if there are others that I'm missing.
