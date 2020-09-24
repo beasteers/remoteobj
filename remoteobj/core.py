@@ -329,6 +329,10 @@ class LocalExcept:
     def all(self):
         return [e for es in self._groups.values() for e in es]
 
+    def clear(self):
+        self._groups.clear()
+        self._excs.clear()
+
 
 class Except(LocalExcept):
     def __init__(self, *types, **kw):
