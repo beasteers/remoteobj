@@ -52,6 +52,7 @@ def _run_remote(obj, event):  # some remote job
 def test_remote():
     obj = ObjectB()
     obj.catch_ = remoteobj.Except()
+    print(obj.remote)
 
     assert obj.remote._listening == False
     with remoteobj.util.dummy_listener(obj, _run_remote):
@@ -179,6 +180,7 @@ def test_remote_clients():
         with remoteobj.util.remote_func(_state_toggle_test, obj) as (p, c1):
             time.sleep(0.1)
         assert c1.value > 0
+        print(obj.catch_)
         obj.catch_.raise_any()
 
 
@@ -223,30 +225,40 @@ def test_remote_exception():
         obj.catch_.raise_any()  # nothing
         with remoteobj.util.remote_func(_do_work, obj, 'doesntexist', bool):
             time.sleep(0.1)
+        print(obj.catch_)
         with pytest.raises(AttributeError):
             obj.catch_.raise_any()
 
 
 
-def _raise_stuff(obj):
-    with obj.catch_('overall'):
-        with obj.catch_:
+def _raise_stuff(catch):
+    with catch('overall'):
+        with catch:
             raise AttributeError('a')
-        with obj.catch_():
+        with catch():
             raise KeyError('a')
-        with obj.catch_('init'):
+        with catch('init'):
             raise ValueError('b')
         for _ in range(5):
-            with obj.catch_('process'):
+            with catch('process'):
                 raise IndexError('c')
-        with obj.catch_('finish'):
+        with catch('finish'):
             raise RuntimeError('d')
         with pytest.raises(AttributeError):
-            with obj.catch_(raises=True):
+            with catch(raises=True):
                 raise AttributeError('e')
         with pytest.raises(AttributeError):
-            with obj.catch_(types=TypeError):
+            with catch(types=TypeError):
                 raise AttributeError('e')
+
+ALL_RAISED_ = {
+    None: [AttributeError('a'), KeyError('a'), AttributeError('e')],
+    'init': [ValueError('b')],
+    'process': [IndexError('c')]*5,
+    'finish': [RuntimeError('d')],
+    'overall': [],
+}
+N_RAISED_ = sum(1 for es in ALL_RAISED_.values() for e in es)
 
 def compare_excs(excs1, excs2):
     return all(
@@ -254,20 +266,26 @@ def compare_excs(excs1, excs2):
         for e1, e2 in zip(excs1 or (), excs2 or ()))
 
 def test_remote_named_exceptions():
-    obj = Types()
-    obj.catch_ = remoteobj.Except(raises=False)
+    catch = remoteobj.Except(raises=False)
 
-    with remoteobj.util.process(_raise_stuff, obj):
+    with remoteobj.util.process(_raise_stuff, catch):
         pass
-    print(obj.catch_)
-    assert compare_excs(
-        obj.catch_.groups.get(None),
-        [AttributeError('a'), KeyError('a'), AttributeError('e')])
-    assert compare_excs(obj.catch_.groups.get('init'), [ValueError('b')])
-    assert compare_excs(obj.catch_.groups.get('process'), [IndexError('c')]*5)
-    assert compare_excs(obj.catch_.groups.get('finish'), [RuntimeError('d')])
-    assert compare_excs(obj.catch_.groups.get('overall'), [])
-    assert len(obj.catch_.all) == 10
+    print(catch)
+    for name, excs in ALL_RAISED_.items():
+        assert compare_excs(catch.group(name), excs)
+    assert len(catch.all()) == N_RAISED_
+
+def test_local_exceptions():
+    catch = remoteobj.LocalExcept()
+
+    _raise_stuff(catch)
+    print(catch)
+    for name, excs in ALL_RAISED_.items():
+        assert compare_excs(catch.group(name), excs)
+    assert len(catch.all()) == N_RAISED_
+
+
+
 
 
 def test_dueling_threads():

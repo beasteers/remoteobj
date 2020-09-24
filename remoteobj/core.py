@@ -8,7 +8,7 @@ import multiprocessing as mp
 from .view import View
 
 
-__all__ = ['Proxy', 'Except', 'RemoteException']
+__all__ = ['Proxy', 'Except', 'LocalExcept', 'RemoteException']
 
 
 def make_token(name):
@@ -270,18 +270,17 @@ class Proxy(View):
 
 
 
-class Except:
+class LocalExcept:
     '''Catch exceptions in a remote process with their traceback and send them
     back to be raised properly in the main process.'''
     def __init__(self, *types, raises=False):
         self._local, self._remote = mp.Pipe()
         self.types = types or (BaseException,)
         self.raises = raises
-        self.groups = {}
+        self._groups = {}
         self._excs = {}
 
     def __str__(self):
-        self.pull()
         return '<{} raises={} types={}{}>'.format(
             self.__class__.__name__, self.raises, self.types,
             ''.join(
@@ -290,7 +289,7 @@ class Except:
                     (' - last: ({}: {!r})'.format(type(excs[-1]).__name__, str(excs[-1]))
                      if excs else '')
                 )
-                for name, excs in self.groups.items()
+                for name, excs in self._groups.items()
             )
         )
 
@@ -309,31 +308,58 @@ class Except:
             return not self.raises
 
     def set(self, exc, name=None):
-        self._remote.send((
-            RemoteException(exc) if exc is not None else None, name))
+        if name not in self._groups:
+            self._groups[name] = []
+        self._groups[name].append(exc)
+        self._excs[name] = exc
 
-    def get(self, name=None, all=False):
-        self.pull()
-        return self.groups.get(name) if all else self._excs.get(name)
+    def get(self, name=None):
+        return self._excs.get(name)
 
-    def pull(self):
-        '''Pull any exceptions through the pipe.'''
-        while self._local.poll():
-            exc, name = self._local.recv()
-            if name not in self.groups:
-                self.groups[name] = []
-            self.groups[name].append(exc)
-            self._excs[name] = exc
+    def group(self, name=None):
+        return self._groups.get(name)
 
     def raise_any(self, name=None):
         exc = self.get(name)
         if exc is not None:
             raise exc
 
-    @property
     def all(self):
-        return [e for es in self.groups.values() for e in es]
+        return [e for es in self._groups.values() for e in es]
 
+
+class Except(LocalExcept):
+    def __init__(self, *types, raises=False):
+        self._local, self._remote = mp.Pipe()
+        super().__init__(*types, raises=raises)
+
+    def __str__(self):
+        self.pull()
+        return super().__str__()
+
+    def get(self, name=None):
+        self.pull()
+        return super().get(name)
+
+    def group(self, name=None):
+        self.pull()
+        return super().group(name)
+
+    def all(self):
+        self.pull()
+        return super().all()
+
+    def set(self, exc, name=None):
+        self._remote.send((
+            RemoteException(exc) if exc is not None else None, name))
+
+
+
+    def pull(self):
+        '''Pull any exceptions through the pipe.'''
+        while self._local.poll():
+            exc, name = self._local.recv()
+            super().set(exc, name)
 
 
 class _ExceptContext:
