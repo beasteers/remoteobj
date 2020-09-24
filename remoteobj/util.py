@@ -8,6 +8,9 @@ import multiprocessing as mp
 
 
 class AnyValue:
+    '''Pass arbitrary values by pickling. Because of FIFO, it's inefficient to
+    send big objects, especially if this value is being read across many processes.
+    This is meant more for Exceptions and things like that.'''
     def __init__(self, initval=None):
         self._value = initval
         self._count = 0
@@ -32,6 +35,7 @@ class AnyValue:
 
 
 class AnyValueProp(AnyValue):
+    '''An alternative interface for AnyValue that uses class descriptors.'''
     def __init__(self, name=None):
         if not name:
             name = '_{}{}'.format(self.__class__.__name__, id(self))
@@ -86,6 +90,7 @@ def _remote_listener(obj, func, *a, wait=True, **kw):
 
 
 def dummy_listener(obj, bg=False, **kw):
+    '''Start a background process with obj.remote listening.'''
     return _remote_listener(obj, bg if callable(bg) else _run_remote_bg if bg else _run_remote, **kw)
 
 
@@ -119,4 +124,13 @@ def _remote_proc(func, callback, *a, **kw):
     p.join()
 
 def remote_func(callback, *a, **kw):
+    '''Run a function repeatedly in a separate process.'''
     return _remote_proc(_run_remote_func, callback, *a, **kw)
+
+@contextmanager
+def process(func, *a, **kw):
+    '''Run func in a separate process.'''
+    p = mp.Process(target=func, args=a, kwargs=kw, daemon=True)
+    p.start()
+    yield p
+    p.join()

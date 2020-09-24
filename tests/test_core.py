@@ -1,6 +1,5 @@
 import time
 import remoteobj
-import multiprocessing as mp
 import pytest
 
 
@@ -145,39 +144,6 @@ def test_remote():
         obj.catch_.raise_any()
 
 
-class PropObj:
-    exc2 = remoteobj.util.AnyValueProp('exc2')
-    def __init__(self):
-        self.counter = remoteobj.util.AnyValue(0)
-        self.exc = remoteobj.util.AnyValue()
-
-    def run(self):
-        try:
-            for _ in range(10):
-                self.counter.value += 1
-                time.sleep(0.05)
-            raise ValueError('something')
-        except Exception as exc:
-            e = remoteobj.RemoteException(exc)
-            self.exc.value = e
-            self.exc = e
-
-
-def test_anyvalue():
-    obj = PropObj()
-    with remoteobj.util.remote_func(obj.run):
-        results = []
-        while True:
-            x = obj.counter.value
-            results.append(x)
-            time.sleep(0.001)
-            if x >= 9:
-                break
-    assert set(results) == set(range(10))
-    exc = obj.exc.value
-    assert isinstance(exc, ValueError)
-    assert str(exc) == 'something'
-    assert 'in run' in str(exc.__cause__)
 
 
 
@@ -213,9 +179,10 @@ def test_remote_clients():
         with remoteobj.util.remote_func(_state_toggle_test, obj) as (p, c1):
             time.sleep(0.1)
         assert c1.value > 0
-        exc = obj.catch_.get()
-        if exc:
-            raise exc
+        obj.catch_.raise_any()
+
+
+
 
 
 
@@ -229,6 +196,9 @@ class Types:
 
     def integer(self):
         return 5
+
+    def tuple(self):
+        return ()
 
     def string(self):
         return 'asdfasdfasdf'
@@ -250,11 +220,55 @@ def test_remote_exception():
     with remoteobj.util.dummy_listener(obj):
         assert obj.remote._listening == True
 
-
+        obj.catch_.raise_any()  # nothing
         with remoteobj.util.remote_func(_do_work, obj, 'doesntexist', bool):
             time.sleep(0.1)
         with pytest.raises(AttributeError):
-            exc = obj.remote.raise_exception_()
+            obj.catch_.raise_any()
+
+
+
+def _raise_stuff(obj):
+    with obj.catch_('overall'):
+        with obj.catch_:
+            raise AttributeError('a')
+        with obj.catch_():
+            raise KeyError('a')
+        with obj.catch_('init'):
+            raise ValueError('b')
+        for _ in range(5):
+            with obj.catch_('process'):
+                raise IndexError('c')
+        with obj.catch_('finish'):
+            raise RuntimeError('d')
+        with pytest.raises(AttributeError):
+            with obj.catch_(raises=True):
+                raise AttributeError('e')
+        with pytest.raises(AttributeError):
+            with obj.catch_(types=TypeError):
+                raise AttributeError('e')
+
+def compare_excs(excs1, excs2):
+    return all(
+        type(e1) == type(e2) and str(e1) == str(e2)
+        for e1, e2 in zip(excs1 or (), excs2 or ()))
+
+def test_remote_named_exceptions():
+    obj = Types()
+    obj.catch_ = remoteobj.Except(raises=False)
+
+    with remoteobj.util.process(_raise_stuff, obj):
+        pass
+    print(obj.catch_)
+    assert compare_excs(
+        obj.catch_.groups.get(None),
+        [AttributeError('a'), KeyError('a'), AttributeError('e')])
+    assert compare_excs(obj.catch_.groups.get('init'), [ValueError('b')])
+    assert compare_excs(obj.catch_.groups.get('process'), [IndexError('c')]*5)
+    assert compare_excs(obj.catch_.groups.get('finish'), [RuntimeError('d')])
+    assert compare_excs(obj.catch_.groups.get('overall'), [])
+    assert len(obj.catch_.all) == 10
+
 
 def test_dueling_threads():
     '''Determine if two threads making requests at the same time causes problems.'''
@@ -268,11 +282,53 @@ def test_dueling_threads():
         with remoteobj.util.remote_func(_do_work, obj, 'boolean', bool) as (p, c1):
             with remoteobj.util.remote_func(_do_work, obj, 'string', str) as (p, c2):
                 with remoteobj.util.remote_func(_do_work, obj, 'integer', int) as (p, c3):
+                    time.sleep(0.2)
+                    _do_work(obj, 'tuple', tuple)
                     time.sleep(0.5)
+        print('duel counts', c1.value, c2.value, c3.value)
         assert c1.value > 0
         assert c2.value > 0
         assert c3.value > 0
 
-        exc = obj.catch_.get()
-        if exc:
-            raise exc
+        obj.catch_.raise_any()
+
+
+
+
+
+
+
+
+class PropObj:
+    exc2 = remoteobj.util.AnyValueProp('exc2')
+    def __init__(self):
+        self.counter = remoteobj.util.AnyValue(0)
+        self.exc = remoteobj.util.AnyValue()
+
+    def run(self):
+        try:
+            for _ in range(10):
+                self.counter.value += 1
+                time.sleep(0.05)
+            raise ValueError('something')
+        except Exception as exc:
+            e = remoteobj.RemoteException(exc)
+            self.exc.value = e
+            self.exc = e
+
+
+def test_anyvalue():
+    obj = PropObj()
+    with remoteobj.util.remote_func(obj.run):
+        results = []
+        while True:
+            x = obj.counter.value
+            results.append(x)
+            time.sleep(0.001)
+            if x >= 9:
+                break
+    assert set(results) == set(range(10))
+    exc = obj.exc.value
+    assert isinstance(exc, ValueError)
+    assert str(exc) == 'something'
+    assert 'in run' in str(exc.__cause__)

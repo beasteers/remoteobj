@@ -57,8 +57,18 @@ class Proxy(View):
     '''Capture and apply operations to a remote object.
 
     Usage:
+    >>> proxy = Proxy(list)
+    >>> proxy.append(5)
+    >>> assert proxy.passto(len) == 1  # len(proxy)
+    >>> assert proxy[0].get_() == 5    # proxy[0]
+    >>> proxy[0] = 6
+    >>> assert proxy[0].__ == 6        # proxy[0] - same as get_()
 
-
+    >>> proxy.another = []
+    >>> assert isinstance(proxy.another, Proxy)
+    >>> assert isinstance(proxy.append, Proxy)
+    >>> assert isinstance(proxy.another.append, Proxy)
+    >>> assert proxy.another.append(6) is None
     '''
     _thread = None
     _delay = 1e-5
@@ -263,31 +273,80 @@ class Proxy(View):
 class Except:
     '''Catch exceptions in a remote process with their traceback and send them
     back to be raised properly in the main process.'''
-    _exc = None
     def __init__(self, *types, raises=False):
         self._local, self._remote = mp.Pipe()
-        self._types = types or (BaseException,)
-        self._raises = raises
-        self.all = []
+        self.types = types or (BaseException,)
+        self.raises = raises
+        self.groups = {}
+        self._excs = {}
+
+    def __str__(self):
+        self.pull()
+        return '<{} raises={} types={}{}>'.format(
+            self.__class__.__name__, self.raises, self.types,
+            ''.join(
+                '\n {:>15} [{} raised]{}'.format(
+                    '*default*' if name is None else name, len(excs),
+                    (' - last: ({}: {!r})'.format(type(excs[-1]).__name__, str(excs[-1]))
+                     if excs else '')
+                )
+                for name, excs in self.groups.items()
+            )
+        )
+
+    def __call__(self, name=None, raises=None, types=()):
+        return _ExceptContext(
+            self, name,
+            self.raises if raises is None else raises,
+            self.types if not types else types)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if isinstance(exc_val, self._types):
+        if exc_val is not None and isinstance(exc_val, self.types):
             self.set(exc_val)
-            return not self._raises
+            return not self.raises
 
-    def set(self, exc):
-        self._remote.send(RemoteException(exc))
+    def set(self, exc, name=None):
+        self._remote.send((
+            RemoteException(exc) if exc is not None else None, name))
 
-    def get(self):
-        if self._local.poll():
-            self._exc = self._local.recv()
-            self.all.append(self._exc)
-        return self._exc
+    def get(self, name=None, all=False):
+        self.pull()
+        return self.groups.get(name) if all else self._excs.get(name)
 
-    def raise_any(self):
-        exc = self.get()
-        if exc:
+    def pull(self):
+        '''Pull any exceptions through the pipe.'''
+        while self._local.poll():
+            exc, name = self._local.recv()
+            if name not in self.groups:
+                self.groups[name] = []
+            self.groups[name].append(exc)
+            self._excs[name] = exc
+
+    def raise_any(self, name=None):
+        exc = self.get(name)
+        if exc is not None:
             raise exc
+
+    @property
+    def all(self):
+        return [e for es in self.groups.values() for e in es]
+
+
+
+class _ExceptContext:
+    def __init__(self, catch, name=None, raises=False, types=()):
+        self.catch = catch
+        self.name = name
+        self.raises = raises
+        self.types = types
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_val is not None and isinstance(exc_val, self.types):
+            self.catch.set(exc_val, self.name)
+            return not self.raises
