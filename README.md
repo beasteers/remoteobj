@@ -96,6 +96,30 @@ def run(obj):
             obj.remote.process_requests()
 
 ```
+#### Sending Exceptions
+Define an `Except` object - here we're attaching to `obj` for convenience, but handle it however you want.
+
+In your remote process use `catch_` as a context manager and any matching exceptions raised in that context will be pickled with its traceback and appended to its queue.
+
+```python
+# define an exception handler
+obj.catch_ = remoteobj.Except()
+# or be more specific
+obj.catch_ = remoteobj.Except(ValueError, TypeError)
+
+
+def remote_process(obj):
+    with obj.catch_:
+        with obj.remote.background_listen():
+            time.sleep(1)
+            raise ValueError('!!!')
+
+p = mp.Process(target=remote_process, args=(obj,))
+p.start()
+p.join()
+obj.catch_.raise_any()
+```
+
 
 
 ## Operations

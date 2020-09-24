@@ -72,23 +72,26 @@ def _profile():
 
 
 def _profile_func(func):
-    def inner(*a, **kw):
-        with _profile():
-            print('profiling', func.__name__, a, kw)
-            return func(*a, **kw)
+    def inner(*a, catch=None, **kw):
+        with catch:
+            with _profile():
+                print('profiling', func.__name__, a, kw)
+                return func(*a, **kw)
     return inner
 
 
 remoteobj.util._run_remote = _profile_func(remoteobj.util._run_remote)
 
 def run_test(obj, calls, n=100):
+    catch = remoteobj.Except()
     for obj in objs:
         print(obj.remote.__class__.__name__)
-        with remoteobj.util.dummy_listener(obj):
+        with remoteobj.util.dummy_listener(obj, catch=catch):
             with _profile():
                 for _ in range(n):
                     for k in calls:
                         yield obj, k
+        catch.raise_any()
 
 
 

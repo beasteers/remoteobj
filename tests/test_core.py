@@ -1,6 +1,7 @@
 import time
 import remoteobj
 import multiprocessing as mp
+import pytest
 
 
 class ObjectA:
@@ -15,6 +16,10 @@ class ObjectA:
     def asdf(self):
         self.x *= 2
         return self
+
+    def inc(self):
+        self.x += 1
+        return self.x
 
     @property
     def zxcv(self):
@@ -37,22 +42,20 @@ class ObjectB(ObjectA):
         return self.x / 10.
 
 def _run_remote(obj, event):  # some remote job
-    with obj.remote:
-        while not event.is_set():
-            obj.remote.poll()
-            time.sleep(0.0001)
-
-def _run_remote_bg(obj, event):  # some remote job
-    with obj.remote.background_listen():
-        while not event.is_set():
-            time.sleep(0.0001)
+    with obj.catch_:
+        with obj.remote:
+            while not event.is_set():
+                obj.remote.poll()
+                time.sleep(0.0001)
+        raise ValueError('blah')
 
 
 def test_remote():
     obj = ObjectB()
+    obj.catch_ = remoteobj.Except()
 
     assert obj.remote._listening == False
-    with remoteobj.util.dummy_listener(obj):
+    with remoteobj.util.dummy_listener(obj, _run_remote):
         assert obj.remote._listening == True
 
         X = obj.x
@@ -134,12 +137,142 @@ def test_remote():
 
     assert not obj.remote._listening
 
+    exc = obj.catch_.get()
+    assert isinstance(exc, ValueError)
+    assert str(exc) == 'blah'
+    assert 'in _run_remote' in str(exc.__cause__)
+    with pytest.raises(ValueError):
+        obj.catch_.raise_any()
 
-# def test_remote_clients():
-#     '''Determine if the remote instance can get data.'''
 
-# def test_dueling_threads():
-#     '''Determine if two threads making requests at the same time causes problems.'''
+class PropObj:
+    exc2 = remoteobj.util.AnyValueProp('exc2')
+    def __init__(self):
+        self.counter = remoteobj.util.AnyValue(0)
+        self.exc = remoteobj.util.AnyValue()
 
-# def test_remote_exception():
-#     '''Test that remote exceptions are thrown and that the original traceback is displayed.'''
+    def run(self):
+        try:
+            for _ in range(10):
+                self.counter.value += 1
+                time.sleep(0.05)
+            raise ValueError('something')
+        except Exception as exc:
+            e = remoteobj.RemoteException(exc)
+            self.exc.value = e
+            self.exc = e
+
+
+def test_anyvalue():
+    obj = PropObj()
+    with remoteobj.util.remote_func(obj.run):
+        results = []
+        while True:
+            x = obj.counter.value
+            results.append(x)
+            time.sleep(0.001)
+            if x >= 9:
+                break
+    assert set(results) == set(range(10))
+    exc = obj.exc.value
+    assert isinstance(exc, ValueError)
+    assert str(exc) == 'something'
+    assert 'in run' in str(exc.__cause__)
+
+
+
+def _state_toggle_test(obj):
+    with obj.catch_:
+        # local terminate
+        obj.terminate()
+        assert obj.remote.term.get_() == False
+        assert obj.term == True
+
+        obj.start()
+        assert obj.remote.term.get_() == False
+        assert obj.term == False
+
+        # remote terminate
+        obj.remote.terminate()
+        assert obj.remote.term.get_() == True
+        assert obj.term == False
+
+        obj.remote.start()
+        assert obj.remote.term.get_() == False
+        assert obj.term == False
+
+
+def test_remote_clients():
+    '''Determine if the remote instance can get data.'''
+    obj = ObjectB()
+    obj.catch_ = remoteobj.Except()
+
+    assert obj.remote._listening == False
+    with remoteobj.util.dummy_listener(obj):
+        assert obj.remote._listening == True
+        with remoteobj.util.remote_func(_state_toggle_test, obj) as (p, c1):
+            time.sleep(0.1)
+        assert c1.value > 0
+        exc = obj.catch_.get()
+        if exc:
+            raise exc
+
+
+
+
+class Types:
+    def __init__(self):
+        self.remote = remoteobj.Proxy(self)
+
+    def boolean(self):
+        return True
+
+    def integer(self):
+        return 5
+
+    def string(self):
+        return 'asdfasdfasdf'
+
+
+def _do_work(obj, k, type_, n=20):
+    with obj.catch_:
+        xs = [isinstance(obj.remote.attrs_(k).get_(), type_) for _ in range(n)]
+        return True
+    return False
+
+
+def test_remote_exception():
+    '''Test that remote exceptions are thrown and that the original traceback is displayed.'''
+    obj = Types()
+    obj.catch_ = remoteobj.Except()
+
+    assert obj.remote._listening == False
+    with remoteobj.util.dummy_listener(obj):
+        assert obj.remote._listening == True
+
+
+        with remoteobj.util.remote_func(_do_work, obj, 'doesntexist', bool):
+            time.sleep(0.1)
+        with pytest.raises(AttributeError):
+            exc = obj.remote.raise_exception_()
+
+def test_dueling_threads():
+    '''Determine if two threads making requests at the same time causes problems.'''
+    obj = Types()
+    obj.catch_ = remoteobj.Except()
+
+    assert obj.remote._listening == False
+    with remoteobj.util.dummy_listener(obj):
+        assert obj.remote._listening == True
+
+        with remoteobj.util.remote_func(_do_work, obj, 'boolean', bool) as (p, c1):
+            with remoteobj.util.remote_func(_do_work, obj, 'string', str) as (p, c2):
+                with remoteobj.util.remote_func(_do_work, obj, 'integer', int) as (p, c3):
+                    time.sleep(0.5)
+        assert c1.value > 0
+        assert c2.value > 0
+        assert c3.value > 0
+
+        exc = obj.catch_.get()
+        if exc:
+            raise exc

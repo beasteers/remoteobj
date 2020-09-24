@@ -101,7 +101,6 @@ class View:
     def passto(self, func, *a, **kw):
         return self._extend(('f()', (func, a, kw)))
 
-    @classmethod
     def attrs_(self, *keys):
         '''Access nested attributes using strings.
         e.g.

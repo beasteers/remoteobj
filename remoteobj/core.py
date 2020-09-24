@@ -1,6 +1,6 @@
 import time
-import random
 import collections
+from contextlib import contextmanager
 import threading
 import traceback
 import warnings
@@ -8,7 +8,7 @@ import multiprocessing as mp
 from .view import View
 
 
-__all__ = ['Proxy']
+__all__ = ['Proxy', 'Except', 'RemoteException']
 
 
 def make_token(name):
@@ -39,7 +39,7 @@ class _RemoteTraceback(Exception):
     def __str__(self):
         return self.tb
 
-class _RemoteException:
+class RemoteException:
     def __init__(self, exc):
         self.exc = exc
         self.tb = '\n"""\n{}"""'.format(''.join(
@@ -63,16 +63,16 @@ class Proxy(View):
     _thread = None
     _delay = 1e-5
     _listener_process_name = None
-    NOCOPY = ['_local', '_remote', '_llock', '_rlock']
-    def __init__(self, instance, *a, default=UNDEFINED, eager_proxy=True, **kw):
-        super().__init__(*a, **kw)
+    NOCOPY = ['_local', '_remote', '_llock', '_rlock', '_listening_val']
+    def __init__(self, instance, default=UNDEFINED, eager_proxy=True, **kw):
+        super().__init__(**kw)
         self._obj = instance
 
         # cross-process objects
+        self._listening_val = mp.Value('i', 0, lock=False)
         self._llock, self._rlock = mp.Lock(), mp.Lock()
         self._local, self._remote = mp.Pipe()
 
-        self._listening_val = mp.Value('i', 0, lock=False)
         self._default = default
         self._eager_proxy = eager_proxy
         self._root = self  # isn't called when extending
@@ -82,7 +82,7 @@ class Proxy(View):
 
     def __getstate__(self):
         # NOTE: So we don't pickle queues, locks, and shared values.
-        return dict(self.__dict__, _thread=None, _listening=False, **{k: None for k in self.NOCOPY})
+        return dict(self.__dict__, _thread=None, **{k: None for k in self.NOCOPY})
 
     # remote calling interface
 
@@ -102,7 +102,7 @@ class Proxy(View):
                 try:
                     result = view.resolve_view(self._obj)
                 except BaseException as e:
-                    self._remote.send((None, _RemoteException(e)))
+                    self._remote.send((None, RemoteException(e)))
                     return
 
                 # result came out fine
@@ -122,7 +122,7 @@ class Proxy(View):
     # parent calling interface
 
     def get_(self, default=UNDEFINED):
-        if self._local_listener:  # if you're in the remote thread, just run the function.
+        if self._local_listener:  # if you're in the remote process, just run the function.
             return self.resolve_view(self._obj)
         with self._llock:
             if self._listening:  # if the remote process is listening, run
@@ -145,7 +145,6 @@ class Proxy(View):
     def __(self):
         '''Get value from remote object. Alias for self.get_()'''
         return self.get_()
-
 
     @property
     def _local_listener(self):
@@ -258,3 +257,37 @@ class Proxy(View):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.background_stop()
         self._listening = False
+
+
+
+class Except:
+    '''Catch exceptions in a remote process with their traceback and send them
+    back to be raised properly in the main process.'''
+    _exc = None
+    def __init__(self, *types, raises=False):
+        self._local, self._remote = mp.Pipe()
+        self._types = types or (BaseException,)
+        self._raises = raises
+        self.all = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if isinstance(exc_val, self._types):
+            self.set(exc_val)
+            return not self._raises
+
+    def set(self, exc):
+        self._remote.send(RemoteException(exc))
+
+    def get(self):
+        if self._local.poll():
+            self._exc = self._local.recv()
+            self.all.append(self._exc)
+        return self._exc
+
+    def raise_any(self):
+        exc = self.get()
+        if exc:
+            raise exc
