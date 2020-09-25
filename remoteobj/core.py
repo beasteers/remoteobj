@@ -74,7 +74,7 @@ class Proxy(View):
     _delay = 1e-5
     _listener_process_name = None
     NOCOPY = ['_local', '_remote', '_llock', '_rlock', '_listening_val']
-    def __init__(self, instance, default=UNDEFINED, eager_proxy=True, **kw):
+    def __init__(self, instance, default=UNDEFINED, eager_proxy=True, fulfill_final=True, **kw):
         super().__init__(**kw)
         self._obj = instance
 
@@ -85,6 +85,7 @@ class Proxy(View):
 
         self._default = default
         self._eager_proxy = eager_proxy
+        self._fulfill_final = fulfill_final
         self._root = self  # isn't called when extending
 
     def __str__(self):
@@ -138,12 +139,14 @@ class Proxy(View):
             if self._listening:  # if the remote process is listening, run
                 # send and wait for a result
                 self._local.send(self._keys)
-                x, exc = self._local.recv()
-                if x == SELF:
-                    x = self._root  # root remote object without any ops
-                if exc is not None:
-                    raise exc
-                return x
+                x = self._local.recv()
+                if x is not None:
+                    x, exc = x
+                    if x == SELF:
+                        x = self._root  # root remote object without any ops
+                    if exc is not None:
+                        raise exc
+                    return x
 
         # if a default value is provided, then return that, otherwise return a default.
         default = self._default if default == UNDEFINED else default
@@ -205,8 +208,15 @@ class Proxy(View):
 
     @_listening.setter
     def _listening(self, value):
-        with self._llock:
-            self._listening_val.value = int(value)
+        # do what you've got to do to get the lock
+        while not self._llock.acquire(0):
+            if self._fulfill_final:
+                self.poll()
+            else:
+                self._remote.send(None)  # cancel
+
+        self._listening_val.value = int(value)
+        self._llock.release()
         self._listener_process_name = mp.current_process().name if value else None
 
     # remote background listening interface
@@ -249,12 +259,10 @@ class Proxy(View):
         try:
             self._listening = True
             while self._listening:
-                self.process_messages()
+                self.process_requests()
                 time.sleep(self._delay)
         finally:
             self._listening = False
-            self.process_messages()
-
 
     def wait_until_listening(self):
         while not self._listening:
