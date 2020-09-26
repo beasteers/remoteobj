@@ -1,6 +1,7 @@
 import time
+import functools
 import collections
-from contextlib import contextmanager
+# from contextlib import contextmanager
 import threading
 import traceback
 import warnings
@@ -109,7 +110,6 @@ class Proxy(View):
             with self._rlock:
                 view = self._remote.recv()
                 view = View(*view)
-
                 try:
                     result = view.resolve_view(self._obj)
                 except BaseException as e:
@@ -208,16 +208,18 @@ class Proxy(View):
 
     @_listening.setter
     def _listening(self, value):
-        # do what you've got to do to get the lock
-        while not self._llock.acquire(0):
-            if self._fulfill_final:
-                self.poll()
-            else:
-                self._remote.send(None)  # cancel
-
+        # set first so no one else can
+        prev = self._listening
         self._listening_val.value = int(value)
-        self._llock.release()
         self._listener_process_name = mp.current_process().name if value else None
+        # make sure no one is left waiting.
+        if prev and not value:
+            if self._fulfill_final:
+                self.process_requests()
+            else:
+                while self._remote.poll():
+                    _ = self._remote.recv()
+                    self._remote.send(None)  # cancel
 
     # remote background listening interface
     '''
@@ -264,8 +266,14 @@ class Proxy(View):
         finally:
             self._listening = False
 
-    def wait_until_listening(self):
-        while not self._listening:
+    def wait_until_listening(self, proc=None, fail=True):
+        while True:
+            if self._listening:
+                return True
+            if proc is not None and not proc.is_alive():
+                if fail:
+                    raise RuntimeError('Process is dead and the proxy never started listening.')
+                return False
             time.sleep(self._delay)
 
     def __enter__(self):
@@ -275,6 +283,14 @@ class Proxy(View):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.background_stop()
         self._listening = False
+
+    def with_listener(self, func):
+        return functools.wraps(func)(
+            functools.partial(self._with_listener_wrap, func))
+
+    def _with_listener_wrap(self, func, *a, **kw):
+        with self.background_listen():
+            return func(*a, **kw)
 
 
 
@@ -341,6 +357,14 @@ class LocalExcept:
         self._groups.clear()
         self._excs.clear()
 
+    def wrap(self, func):
+        return functools.wraps(func)(
+            functools.partial(self._func_wrapper, func))
+
+    def _func_wrapper(self, func, *a, **kw):
+        with self(raises=False):
+            return func(*a, **kw)
+
 
 class Except(LocalExcept):
     def __init__(self, *types, **kw):
@@ -365,7 +389,7 @@ class Except(LocalExcept):
 
     def set(self, exc, name=None, mark=True):
         self._remote.send((
-            RemoteException(exc) if exc is not None else None, name))
+            RemoteException(exc) if isinstance(exc, BaseException) else exc, name))
         if mark:
             exc.__remoteobj_caught__ = name
 
