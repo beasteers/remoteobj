@@ -4,6 +4,7 @@ import pickle
 import functools
 from contextlib import contextmanager
 import multiprocessing as mp
+import remoteobj
 
 
 
@@ -80,13 +81,11 @@ def _run_remote_bg(obj, event, callback=None, delay=1e-5):  # some remote job
 @contextmanager
 def _remote_listener(obj, func, *a, wait=True, **kw):
     event = mp.Event()
-    p = mp.Process(target=func, args=(obj, event,) + a, kwargs=kw, daemon=True)
-    p.start()
-    if wait:
-        obj.remote.wait_until_listening()
-    yield p
-    event.set()
-    p.join()
+    with process(func, obj, event, *a, **kw) as p:
+        if wait:
+            obj.remote.wait_until_listening()
+        yield p
+        event.set()
 
 
 def dummy_listener(obj, bg=False, **kw):
@@ -113,24 +112,44 @@ def _run_remote_func(callback, event, count, *a, delay=1e-5, **kw):
         time.sleep(delay)
         count.value += 1
 
+
 @contextmanager
 def _remote_proc(func, callback, *a, **kw):
     count = mp.Value('i', 0)
     event = mp.Event()
-    p = mp.Process(target=func, args=(callback, event, count) + a, kwargs=kw, daemon=True)
-    p.start()
-    yield p, count
-    event.set()
-    p.join()
+    with process(func, callback, event, count, *a, **kw) as p:
+        yield p, count
+        event.set()
+
 
 def remote_func(callback, *a, **kw):
     '''Run a function repeatedly in a separate process.'''
     return _remote_proc(_run_remote_func, callback, *a, **kw)
 
-@contextmanager
-def process(func, *a, **kw):
-    '''Run func in a separate process.'''
-    p = mp.Process(target=func, args=a, kwargs=kw, daemon=True)
-    p.start()
-    yield p
-    p.join()
+
+class process(mp.Process):
+    def __init__(self, func, *a, process_kw=None, **kw):
+        self.exc = remoteobj.Except()
+        process_kw = process_kw or {}
+        process_kw.setdefault('daemon', True)
+        super().__init__(
+            target=self.exc.wrap(func),
+            args=a, kwargs=kw, **process_kw)
+
+        # set a default name - _identity is set in __init__ so we have to
+        # run it after
+        if 'name' not in process_kw:
+            self._name = '{}-{}'.format(
+                func.__name__, ':'.join(str(i) for i in self._identity))
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        self.join()
+
+    def join(self, raises=True):
+        super().join()
+        if raises:
+            self.exc.raise_any()
