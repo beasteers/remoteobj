@@ -3,16 +3,83 @@ Interacting with objects across processes.
 
 This uses multiprocessing pipes to send messages and operations from the main process to the remote process.
 
-Basically this lets do things like call `.close()` or `.pause()`, or `.ready` on an object that was sent to another process. But it also supports more than that.
+Basically this lets do things like call `.close()` or `.pause()`, or `.ready` on an object that was sent to another process. But it also supports more than that!
 
+What's included:
+ - [Proxy](#example): remote proxy for communicating with forked objects. This was the initial purpose of this package
+ - [process](#enhanced-processes): Process class but with fewer hurdles. Makes it more like you're writing normal python.
+ - [Except](#sending-exceptions): context manager for capturing remote exceptions, assigning them to different groups, and sending them to the main process
+ - [LocalExcept](#local-exceptions): the same context manager interface but without the inter-process communication
 ## Install
 
 ```bash
 pip install remoteobj
 ```
 
-## Basic Usage
+## Example
+Here we have an object that we want to run in a separate process. We want to be able to get/set the object's state as it's running so we wrap the object in a remote `Proxy` object which will run in the background of the remote process and execute the calls that we make in the main process.
+```python
+import time
+import remoteobj
+import multiprocessing as mp
 
+class Object:
+    '''Remote object to do some counting.'''
+    def __init__(self):
+        self.remote = remoteobj.Proxy(self)
+
+    count = 0
+    on, stop = False, False
+    def toggle(self, state=True):
+        self.on = state
+
+    def run(self):
+        '''Remote process'''
+        # starts thread to execute requests
+        with self.remote.background_listen():
+            while not self.stop:
+                if self.on:
+                    self.count += 1
+                time.sleep(0.1)
+
+# start process
+
+obj = Object()
+
+p = mp.Process(target=obj.run)
+p.start()
+# make sure we've started up
+# pass p so we aren't left hanging if the process dies
+obj.remote.wait_until_listening(p)
+
+# turn on, get starting count, count should be increasing
+
+obj.remote.toggle(True)
+x = obj.remote.count.get_()
+time.sleep(1)
+assert obj.remote.count.get_() > x  # 10 > 1
+
+# turn off, count should stay the same
+
+obj.remote.toggle(False)
+x = obj.remote.count.get_()
+time.sleep(1)
+assert obj.remote.count.get_() == x  # 10 == 10
+
+# turn back on, count should increase again
+
+obj.remote.toggle(True)
+x = obj.remote.count.__  # alias for get_()
+time.sleep(1)
+assert obj.remote.count.__ > x  # 20 > 10
+
+# set the remote stop attribute to exit and join
+obj.remote.stop = True  # you can set attrs too?? (ﾟﾛﾟ*)
+p.join()
+```
+
+## Basic Usage
+This explains the mechanics that are going on in more detail.
 ```python
 import remoteobj
 
@@ -65,6 +132,8 @@ r_obj[0] = 6
 r_obj.something = 10
 ```
 
+>**NOTE:** you cannot get/set attributes that begin with an underscore. All underscore attributes reference the proxy object itself.
+
 Now on the remote side:
 
 ```python
@@ -96,7 +165,27 @@ def run(obj):
             obj.remote.process_requests()
 
 ```
-#### Sending Exceptions
+### Enhanced Processes
+Sometimes the `multiprocessing.Process` is a bit lacking in terms of interface so I wrote a lightweight wrapper that:
+ - has a cleaner signature - `process(func, *a, **kw)`
+ - can be used as a context manager `with process(...):`
+ - pulls the process name from the function name by default
+ - defaults to `daemon=True`
+ - will raise the remote exception (using `remoteobj.Except()`)
+```python
+def remote_func(x, y):
+    ...
+
+with remoteobj.util.process(remote_func, 5, 2) as p:
+    assert p.name == 'remote_func-1'
+    ... # do some other stuff
+
+# now the process has joined
+```
+
+>**TODO:** return values, yielding from generators?
+
+### Sending Exceptions
 Sending exceptions back from another process is always such a pain because you have to deal with all of the inter-process communication scaffolding, setting up queues, etc.
 
 The `Except` class lets you catch exceptions and add them to different named groups. This is useful if you need to separate out exceptions for setup errors, processing errors, or clean up errors.
@@ -124,7 +213,7 @@ catch.raise_any()  # will raise any exception
 # or
 catch.raise_any(None)  # will raise any exception in the default context
 ```
-#### Local Exceptions
+### Local Exceptions
 We can use the same syntax and context mechanics without the inter-process communication to catch errors locally.
 ```python
 # define an exception handler
@@ -141,7 +230,9 @@ catch.raise_any('hi')
 catch.raise_any()
 ```
 
-## Operations
+## Proxy
+
+### Operations
 These are the operations that a remote view can handle, which covers the main ways of accessing information from an object. Let me know if there are others that I'm missing.
 
 NOTE: Any operation that returns a proxy can be chained.
@@ -161,7 +252,7 @@ To resolve a proxy, you can do one of three equivalent styles:
  - `obj.attr.get_(default='asdf')` - access via chaining - convenient, somewhat clear
  - `obj.attr.__` - an attempt at a minimalist interface, doesn't handle default value, not super clear. it's the easiest on the eyes once you know what it means, but I agree that the obscurity is a bit of an issue.
 
-## How it works
+### How it works
 
 We override basic python operators so that they return an object that represents a chain of operations (`Proxy`, `View` objects).
  - `View` objects represents a chain of operations
@@ -185,66 +276,7 @@ It is useful to call `proxy.wait_until_listening()` while the remote process is 
 
 If a remote object gets called from the same process as the listening process then it will bypass the pipes and evaluate it directly. This means that if you use threads instead of processes, no data will be sent over pipes.
 
-## Full Example
-
-```python
-import time
-import multiprocessing as mp
-import remoteobj
-
-class SomeObject:
-    '''Some object that you want to communicate with.'''
-    def __init__(self):
-        self.remote = remoteobj.Proxy(self)
-        self.x = 0
-
-    def inc(self):
-        self.x += 1
-
-    def toggle(self, state=None):
-        self.is_on = not self.is_on if state is None else state
-
-
-def run_remote_stuff(obj, event):
-    '''Remote process.'''
-    # We are incrementing a counter if a switch
-    # is turned on.
-    with obj.remote.background_listen():
-        while not event.is_set():
-            if obj.is_on:
-                obj.inc()
-            print(obj.x)
-            time.sleep(0.1)
-
-def run_local_stuff(obj, duration=10):
-    '''Main process.'''
-    # We're just switching something on and off.
-    t0 = time.time()
-    while time.time() - t0 < duration:
-        obj.remote.toggle(True)
-        time.sleep(2)
-        obj.remote.toggle(False)
-        time.sleep(2)
-
-# create your object with the remote proxy
-obj = SomeObject()
-
-# start remote process
-event = mp.Event()
-p = mp.Process(target=run_remote_stuff, args=(obj, event))
-p.start()
-obj.remote.wait_until_listening()
-
-# do things in the meantime
-run_local_stuff(obj)
-print('done')
-
-# close remote
-event.set()
-p.join()
-```
-
-## Advanced
+### Advanced
 
 ```python
 import remoteobj
@@ -273,6 +305,7 @@ obj = B()
 # call super method
 assert obj.remote.asdf() == 6
 assert obj.remote.super.asdf() == 6
+# is equivalent to: super(type(obj), obj).asdf()
 ```
 
 #### Remote methods that chain
@@ -288,3 +321,10 @@ assert obj.remote.chain().chain().chain().x.__ == 3
 assert obj.x == 0
 assert obj.chain().chain().chain().x == 3
 ```
+
+#### Deadlocks
+When dealing with concurrent programming, you always have to be concerned about dead-locking your program.
+
+One area where deadlocking could be a problem is if a client process starts to request an operation as the listening process starts to clean up.
+
+To prevent that, when the listening process is closing, it will either fulfill outstanding requests (default behavior) or refuse them (`Proxy(fulfill_final=False)`).
