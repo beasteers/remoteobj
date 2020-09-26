@@ -1,10 +1,92 @@
 import time
-import ctypes
-import pickle
 import functools
 from contextlib import contextmanager
 import multiprocessing as mp
 import remoteobj
+
+
+
+
+class process(mp.Process):
+    def __init__(self, func, *a, process_kw=None, **kw):
+        self.exc = remoteobj.Except()
+        process_kw = process_kw or {}
+        process_kw.setdefault('daemon', True)
+        super().__init__(
+            target=self.exc.wrap(func),
+            args=a, kwargs=kw, **process_kw)
+
+        # set a default name - _identity is set in __init__ so we have to
+        # run it after
+        if 'name' not in process_kw:
+            self._name = '{}-{}'.format(
+                func.__name__, ':'.join(str(i) for i in self._identity))
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        self.join()
+
+    def join(self, raises=True):
+        super().join()
+        if raises:
+            self.exc.raise_any()
+
+
+
+# Helpers for tests and what not
+
+
+
+def dummy_listener(obj, bg=False, **kw):
+    '''Start a background process with obj.remote listening.'''
+    return _remote_listener(obj, bg if callable(bg) else _run_remote_bg if bg else _run_remote, **kw)
+
+
+def listener_func(func):
+    '''Wrap a function that get's called repeatedly in a remote process with
+    remote object listening. Use as a contextmanager.
+    '''
+    @functools.wraps(func)
+    def inner(obj, *a, **kw):
+        return dummy_listener(obj, *a, callback=func, **kw)
+    return inner
+
+
+def _run_remote(obj, event, callback=None, init=None, cleanup=None, delay=1e-5):  # some remote job
+    with obj.remote:
+        it = range(10)
+        init and init(obj)
+        while not event.is_set():
+            obj.remote.poll()
+            callback and callback(obj)
+            time.sleep(delay)
+        cleanup and cleanup(obj)
+
+def _run_remote_bg(obj, event, callback=None, delay=1e-5):  # some remote job
+    with obj.remote.background_listen():
+        while not event.is_set():
+            callback and callback(obj)
+            time.sleep(delay)
+
+
+@contextmanager
+def _remote_listener(obj, bg=True, wait=True, **kw):
+    func = bg if callable(bg) else _run_remote_bg if bg else _run_remote
+    event = mp.Event()
+    with process(func, obj, event, **kw) as p:
+        if wait:
+            obj.remote.wait_until_listening()
+        yield p
+        event.set()
+
+
+
+
+# Passing single values between processes
+
 
 
 
@@ -55,101 +137,3 @@ class AnyValueProp(AnyValue):
             value = AnyValue()
             setattr(instance, self.name, value)
         return value
-
-
-# Helpers for tests and what not
-
-
-def _run_remote(obj, event, callback=None, init=None, cleanup=None, delay=1e-5):  # some remote job
-    with obj.remote:
-        it = range(10)
-        init and init(obj)
-        while not event.is_set():
-            for _ in it:
-                obj.remote.poll()
-                callback and callback(obj)
-                time.sleep(delay)
-        cleanup and cleanup(obj)
-
-def _run_remote_bg(obj, event, callback=None, delay=1e-5):  # some remote job
-    with obj.remote.background_listen():
-        while not event.is_set():
-            callback and callback(obj)
-            time.sleep(delay)
-
-
-@contextmanager
-def _remote_listener(obj, func, *a, wait=True, **kw):
-    event = mp.Event()
-    with process(func, obj, event, *a, **kw) as p:
-        if wait:
-            obj.remote.wait_until_listening()
-        yield p
-        event.set()
-
-
-def dummy_listener(obj, bg=False, **kw):
-    '''Start a background process with obj.remote listening.'''
-    return _remote_listener(obj, bg if callable(bg) else _run_remote_bg if bg else _run_remote, **kw)
-
-
-def listener_func(func):
-    '''Wrap a function that get's called repeatedly in a remote process with
-    remote object listening. Use as a contextmanager.
-    '''
-    @functools.wraps(func)
-    def inner(obj, *a, **kw):
-        return dummy_listener(obj, *a, callback=func, **kw)
-    return inner
-
-
-
-
-def _run_remote_func(callback, event, count, *a, delay=1e-5, **kw):
-    while not event.is_set():
-        if callback(*a, **kw) is False:
-            return
-        time.sleep(delay)
-        count.value += 1
-
-
-@contextmanager
-def _remote_proc(func, callback, *a, **kw):
-    count = mp.Value('i', 0)
-    event = mp.Event()
-    with process(func, callback, event, count, *a, **kw) as p:
-        yield p, count
-        event.set()
-
-
-def remote_func(callback, *a, **kw):
-    '''Run a function repeatedly in a separate process.'''
-    return _remote_proc(_run_remote_func, callback, *a, **kw)
-
-
-class process(mp.Process):
-    def __init__(self, func, *a, process_kw=None, **kw):
-        self.exc = remoteobj.Except()
-        process_kw = process_kw or {}
-        process_kw.setdefault('daemon', True)
-        super().__init__(
-            target=self.exc.wrap(func),
-            args=a, kwargs=kw, **process_kw)
-
-        # set a default name - _identity is set in __init__ so we have to
-        # run it after
-        if 'name' not in process_kw:
-            self._name = '{}-{}'.format(
-                func.__name__, ':'.join(str(i) for i in self._identity))
-
-    def __enter__(self):
-        self.start()
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_tb):
-        self.join()
-
-    def join(self, raises=True):
-        super().join()
-        if raises:
-            self.exc.raise_any()

@@ -7,7 +7,7 @@ Basically this lets do things like call `.close()` or `.pause()`, or `.ready` on
 
 What's included:
  - [Proxy](#example): remote proxy for communicating with forked objects. This was the initial purpose of this package
- - [process](#enhanced-processes): Process class but with fewer hurdles. Makes it more like you're writing normal python.
+ - [util.process](#enhanced-processes): Process class but with fewer hurdles. Makes it more like you're writing normal python.
  - [Except](#sending-exceptions): context manager for capturing remote exceptions, assigning them to different groups, and sending them to the main process
  - [LocalExcept](#local-exceptions): the same context manager interface but without the inter-process communication
 ## Install

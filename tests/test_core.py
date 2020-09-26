@@ -1,4 +1,5 @@
 import time
+from contextlib import contextmanager
 import remoteobj
 import pytest
 
@@ -182,7 +183,7 @@ def test_remote_clients():
     obj.catch_ = remoteobj.Except()
 
     with remoteobj.util.dummy_listener(obj):
-        with remoteobj.util.remote_func(_state_toggle_test, obj) as (p, c1):
+        with remote_func(_state_toggle_test, obj) as (p, c1):
             time.sleep(0.1)
         assert c1.value > 0
         print(obj.catch_)
@@ -215,6 +216,26 @@ def _do_work(obj, k, type_, n=20):
     return False
 
 
+
+@contextmanager
+def remote_func(func, callback, *a, **kw):
+    '''Run a function repeatedly in a separate process.
+
+    '''
+    count = mp.Value('i', 0)
+    event = mp.Event()
+    with process(func, callback, event, count, *a, **kw) as p:
+        yield p, count
+        event.set()
+
+def _run_remote_func(callback, event, count, *a, delay=1e-5, **kw):
+    while not event.is_set():
+        if callback(*a, **kw) is False:
+            return
+        time.sleep(delay)
+        count.value += 1
+
+
 def test_remote_exception():
     '''Test that remote exceptions are thrown and that the original traceback is displayed.'''
     obj = Types()
@@ -225,7 +246,7 @@ def test_remote_exception():
         assert obj.remote._listening == True
 
         obj.catch_.raise_any()  # nothing
-        with remoteobj.util.remote_func(_do_work, obj, 'doesntexist', bool):
+        with remote_func(_do_work, obj, 'doesntexist', bool):
             time.sleep(0.1)
         print(obj.catch_)
         with pytest.raises(AttributeError):
@@ -242,9 +263,9 @@ def test_dueling_threads():
     with remoteobj.util.dummy_listener(obj):
         assert obj.remote._listening == True
 
-        with remoteobj.util.remote_func(_do_work, obj, 'boolean', bool) as (p, c1):
-            with remoteobj.util.remote_func(_do_work, obj, 'string', str) as (p, c2):
-                with remoteobj.util.remote_func(_do_work, obj, 'integer', int) as (p, c3):
+        with remote_func(_do_work, obj, 'boolean', bool) as (p, c1):
+            with remote_func(_do_work, obj, 'string', str) as (p, c2):
+                with remote_func(_do_work, obj, 'integer', int) as (p, c3):
                     time.sleep(0.2)
                     _do_work(obj, 'tuple', tuple)
                     time.sleep(0.5)
