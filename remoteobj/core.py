@@ -279,7 +279,7 @@ class Proxy(View):
         self._thread_exception = None
         if not bg:
             self.listening_ = True
-            return
+            return self
 
         if self._thread is None:
             self._thread = threading.Thread(

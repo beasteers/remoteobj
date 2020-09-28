@@ -1,3 +1,6 @@
+# 0.2.2
+ - fix `listen_(bg=False)` bug causing deadlock
+
 # 0.2.1
  - move `Proxy.__str__` to `Proxy.__repr__` - for pytest debugging
 
