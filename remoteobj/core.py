@@ -83,8 +83,11 @@ class Proxy(View):
         self._fulfill_final = fulfill_final
         self._root = self  # isn't called when extending
 
-    def __str__(self):
+    def __repr__(self):
         return '<Remote {} : {}>'.format(self._obj, super().__str__())
+
+    def __str__(self):
+        return self.__repr__()
 
     def __getstate__(self):
         # NOTE: So we don't pickle queues, locks, and shared values.

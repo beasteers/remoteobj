@@ -1,3 +1,6 @@
+# 0.2.1
+ - move `Proxy.__str__` to `Proxy.__repr__` - for pytest debugging
+
 # 0.2.0
  - added changelog :p
  - test reorganize so that tests are more isolated/targeted/organized
