@@ -7,9 +7,12 @@ Basically this lets do things like call `.close()` or `.pause()`, or `.ready` on
 
 What's included:
  - [Proxy](#example): remote proxy for communicating with forked objects. This was the initial purpose of this package
- - [util.process](#enhanced-processes): Process class but with fewer hurdles. Makes it more like you're writing normal python.
- - [Except](#sending-exceptions): context manager for capturing remote exceptions, assigning them to different groups, and sending them to the main process
+ - [util.process](#enhanced-processes): `multiprocessing.Process` but with fewer hurdles. Makes it more like you're writing normal python. Handles remote exceptions and
+ - [Except](#sending-process-exceptions): context manager for capturing remote exceptions, assigning them to different groups, and sending them to the main process
  - [LocalExcept](#local-exceptions): the same context manager interface but without the inter-process communication
+
+> **NOTE:** This is still very much in alpha and the interface is still evolving so be sure to pin a version. Also, let me know if you have thoughts/suggestions/requests! For info on how this works, see [here](#how-proxy-works)
+
 ## Install
 
 ```bash
@@ -36,7 +39,7 @@ class Object:
     def run(self):
         '''Remote process'''
         # starts thread to execute requests
-        with self.remote.background_listen():
+        with self.remote.listen_(bg=True):
             while not self.stop:
                 if self.on:
                     self.count += 1
@@ -79,7 +82,11 @@ p.join()
 ```
 
 ## Basic Usage
+
+### Proxy
 This explains the mechanics that are going on in more detail.
+
+> **NOTE:** to avoid name conflicts many of the proxy methods use underscore suffixes (i.e. `get_()`). This also applies to `util.process` arguments. See below.
 ```python
 import remoteobj
 
@@ -138,8 +145,8 @@ Now on the remote side:
 
 ```python
 def run(obj):
-    # starts thread which handles main process requests.
-    with obj.remote.background_listen():
+    # indicate that we're listening
+    with obj.remote:
         # do whatever nonsense you need
         value = 0
         while True:  # do nonsense
@@ -148,45 +155,91 @@ def run(obj):
             for x, y in zip(obj, obj.another):
                 value -= y / x * obj.something
             time.sleep(0.4)
+            # this will make the requests
+            obj.remote.process_requests()
     # after exiting, listening is set to false,
     # clients will fail or return their default
     # immediately because we have notified that
     # we will not be processing any more requests.
 
-
-# or if you want(/need) to have message handling in the
-# main thread, you can handle it manually like this:
+# Here's how to run the listener in a background thread
 
 def run(obj):
-    # indicate that we're listening - no thread this time
-    with obj.remote:
-        while True:
+    # start background thread to listen.
+    with obj.remote.listen_():
+        while obj.remote.listening_:
             ...
-            obj.remote.process_requests()
+            # don't need to call obj.remote.process_requests()
 
 ```
+
+#### Proxy Operations
+These are the operations that a remote view can handle, which covers the main ways of accessing information from an object. Let me know if there are others that I'm missing.
+
+>**NOTE:** Any operation that says it returns a `Proxy` can be chained.
+If a remote method returns `self`, that will be caught and a remote proxy will be returned to allow for chaining as well.
+
+ - **__call\__** (`obj(*a, **kw)`): retrieves return value.
+    - to return a proxy instead, do either:
+        - `Proxy(obj, eager_proxy=True)` to get all as proxies or
+        - `obj.method(_proxy=True)` for a one-time thing
+ - **__getitem\__** (`obj[key]`): returns proxy
+ - **__getattr\__** (`obj.attr`): returns proxy
+ - **__setitem\__** (`obj[key] = value`): evaluates
+ - **__setattr\__** (`obj.attr = value`): evaluates
+ - **__delitem\__** (`del obj[key]`): evaluates
+ - **__delattr\__** (`del obj.attr`): evaluates
+ - **__contains\__** (`x in obj`): evaluates
+ - **len** (`len(obj)`): evaluates
+ - **passto** (`func(obj)`): pass object to a function
+    - e.g. `obj.passto(str)` is equivalent to `str(obj)`
+    - you can also pass args: `obj.passto(func, *a, **kw)`
+
+To resolve a proxy, you can do one of three equivalent styles:
+ - `remoteobj.get(obj.attr, default=False)` - makes it clearer that `obj.attr` is being sent to the main process
+ - `obj.attr.get_(default='asdf')` - access via chaining - convenient, somewhat clear
+ - `obj.attr.__` - an attempt at a minimalist interface, doesn't handle default value, not super clear. it's the easiest on the eyes once you know what it means, but I agree that the obscurity is a bit of an issue.
+
 ### Enhanced Processes
 Sometimes the `multiprocessing.Process` is a bit lacking in terms of interface so I wrote a lightweight wrapper that:
- - has a cleaner signature - `process(func, *a, **kw)`
- - can be used as a context manager `with process(...):`
+ - has a cleaner signature - `process(func, *a, **kw)` => `func(*a, **kw)`
+    - other arguments, such as `name`, `group` have a underscore suffix (e.g. `name_`, `group_`, `daemon_`)
+ - can be used as a context manager `with process(...):` which will join upon exiting.
  - pulls the process name from the function name by default
- - defaults to `daemon=True`
+ - defaults to `daemon_=True`
  - will raise the remote exception (using `remoteobj.Except()`)
+ - sends back `return` and `yield` values via `p.result`
 ```python
 def remote_func(x, y):
-    ...
+    time.sleep(1)
+    return 10
 
 with remoteobj.util.process(remote_func, 5, 2) as p:
     assert p.name == 'remote_func-1'
+    assert p.result == None  # called before return
     ... # do some other stuff
 
 # now the process has joined
+# and we can access the return value of the process!
+assert p.result == 10
+
+
+# now...
+# wait for it....
+
+def remote_func(x, y):
+    for i in range(x, y):
+        yield i
+
+with remoteobj.util.process(remote_func, 5, 10) as p:
+    # p.result returns a generator which will yield the values from the
+    # remote side
+    a_generator = p.result
+    assert list(a_generator) == list(range(5, 10))
 ```
 
->**TODO:** return values, yielding from generators?
-
-### Sending Exceptions
-Sending exceptions back from another process is always such a pain because you have to deal with all of the inter-process communication scaffolding, setting up queues, etc.
+### Sending Process Exceptions
+Sending exceptions back from another process is always such a pain because you have to deal with all of the inter-process communication scaffolding, setting up queues, etc. and it can make your code messy.
 
 The `Except` class lets you catch exceptions and add them to different named groups. This is useful if you need to separate out exceptions for setup errors, processing errors, or clean up errors.
 
@@ -230,32 +283,10 @@ catch.raise_any('hi')
 catch.raise_any()
 ```
 
-## Proxy
-
-### Operations
-These are the operations that a remote view can handle, which covers the main ways of accessing information from an object. Let me know if there are others that I'm missing.
-
-NOTE: Any operation that returns a proxy can be chained.
-
- - **call** (`obj(*a, **kw)`): retrieves return value.
-    - to return a proxy instead, do either `Proxy(obj, eager_proxy=True)` to get all as proxies or `obj.method(_proxy=True)` for a one-time thing
- - **getitem** (`obj[key]`): returns proxy
- - **getattr** (`obj.attr`): returns proxy
- - **setitem** (`obj[key] = value`): evaluates
- - **setattr** (`obj.attr = value`): evaluates
- - **passto** (`value(obj)`): pass object to a function
-    - e.g. `obj.passto(str)` is equivalent to `str(obj)`
-    - you can also pass args: `obj.passto(func, *a, **kw)`
-
-To resolve a proxy, you can do one of three equivalent styles:
- - `remoteobj.get(obj.attr, default=False)` - makes it clearer that `obj.attr` is being sent to the main process
- - `obj.attr.get_(default='asdf')` - access via chaining - convenient, somewhat clear
- - `obj.attr.__` - an attempt at a minimalist interface, doesn't handle default value, not super clear. it's the easiest on the eyes once you know what it means, but I agree that the obscurity is a bit of an issue.
-
-### How it works
+### How `Proxy` works
 
 We override basic python operators so that they return an object that represents a chain of operations (`Proxy`, `View` objects).
- - `View` objects represents a chain of operations
+ - `View` objects represents a chain of operations - this is mainly an internal interface.
  - `Proxy` objects represents a chain of operations linked to an object.
 
 When we go to resolve a chain of operations, we

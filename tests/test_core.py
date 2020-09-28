@@ -2,20 +2,27 @@ import time
 from contextlib import contextmanager
 import remoteobj
 import pytest
+import multiprocessing as mp
 
 
 class ObjectA:
     x = 10
-    term = False
     def __init__(self, **kw):
         self.remote = remoteobj.Proxy(self, **kw)
+        self.data = {'a': 5}
 
     def __str__(self):
-        return f'<A x={self.x} terminated={self.term}>'
+        return f'<A x={self.x}>'
 
     def asdf(self):
         self.x *= 2
         return self
+
+    def chain(self):
+        return self
+
+    def error(self):
+        raise KeyError('error!')
 
     def inc(self):
         self.x += 1
@@ -23,97 +30,141 @@ class ObjectA:
 
     @property
     def zxcv(self):
-        return self.x / 5.
+        return 2
 
-    def terminate(self):
-        self.term = True
-        return self
-
-    def start(self):
-        self.term = False
-        return self
-
-    def error(self):
-        raise ValueError('hii')
 
 class ObjectB(ObjectA):
     @property
     def zxcv(self):
-        return self.x / 10.
+        return 8
 
 
-def test_attribute_access_and_update():
+def test_get():
+    '''Test remote get commands return the expected value.
+
+    Checks: remoteobj.get(o), o.get_(), o.get_(default=...), o.__
+    '''
     obj = ObjectB()
     with remoteobj.util.dummy_listener(obj):
-        # attribute access
-        assert obj.x == 10 and obj.remote.x.get_() == 10
-        # local update
-        obj.asdf()
-        assert obj.x == 20 and obj.remote.x.get_() == 10
-        # remote update
-        obj.remote.asdf()
-        assert obj.x == 20 and obj.remote.x.get_() == 20
-        # property
-        assert obj.zxcv == obj.remote.zxcv.get_() == 20/10
+        assert remoteobj.get(obj.remote.x) == obj.x
+        assert obj.remote.x.get_() == obj.x
+        assert obj.remote.x.__ == obj.x
+
+    # test after remote listener has closed.
+    with pytest.raises(RuntimeError):
+        obj.remote.x.get_()
+    assert obj.remote.x.get_(default=True) == True
 
 
 @pytest.mark.parametrize("bg", [False, True])
 def test_bg_listener(bg):
+    '''Test that the background listener can respond to calls.
+
+    Checks: Proxy.background_listen()
+    '''
     obj = ObjectB()
     with remoteobj.util.dummy_listener(obj, bg=bg):
-        assert obj.remote.x.get_() == 10
+        assert obj.remote.x.__ == 10
+
+    with pytest.raises(KeyError):
+        with remoteobj.util.dummy_listener(obj, bg=bg):
+            obj.remote.error()
+
+
+def test_attr():
+    '''Test get, set, and del attribute.
+
+    Checks: o.x, o.x = y, del o.x, o.passto(hasattr, 'x'), o.prop
+    '''
+    obj = ObjectB()
+    obj.y = 5
+    with remoteobj.util.dummy_listener(obj):
+        # remote setattr
+        obj.remote.y = 6
+        assert isinstance(obj.remote.y, remoteobj.Proxy)
+        assert obj.remote.y.__ == 6 and obj.y == 5
+        obj.remote.y = 5
+        assert obj.remote.y.__ == 5 and obj.y == 5
+
+        # local setattr
+        obj.y = 6
+        assert obj.remote.y.__ == 5 and obj.y == 6
+        obj.y = 5
+        assert obj.remote.y.__ == 5 and obj.y == 5
+
+        # delattr, hasattr
+        attrs = lambda: [
+            hasattr(obj, 'x'),
+            hasattr(obj, 'y'),
+            obj.remote.passto(hasattr, 'x'),
+            obj.remote.passto(hasattr, 'y')]
+        assert attrs() == [True, True, True, True]
+        del obj.remote.y
+        assert attrs() == [True, True, True, False]
+        del obj.y
+        assert attrs() == [True, False, True, False]
+        obj.remote.y = 2
+        assert attrs() == [True, False, True, True]
+
+        # property
+        assert obj.remote.zxcv.__ == 8
+
+
+def test_getset_item():
+    '''Test get, set, and del attribute.
+
+    Checks: o[x], o[x] = y, del o[x], x in o, len(o)
+    '''
+    obj = ObjectB()
+    with remoteobj.util.dummy_listener(obj):
+        assert 'a' in obj.remote.data
+        assert obj.remote.data.passto(list) == ['a']
+        assert obj.remote.data['a'].__ == 5
+        assert 'b' not in obj.remote.data
+        assert len(obj.remote.data) == 1
+
+
+        obj.remote.data['b'] = 8
+        assert 'b' in obj.remote.data
+        assert len(obj.remote.data) == 2
+        del obj.remote.data['a']
+        assert 'a' not in obj.remote.data
+        assert 'b' in obj.remote.data
+        assert len(obj.remote.data) == 1
 
 
 def test_chaining():
+    '''Test that a remote object returning self will translate to returning the
+    proxy object.
+
+    Checks: return self -> value = SELF -> self if value == SELF
+    '''
     obj = ObjectB()
     with remoteobj.util.dummy_listener(obj):
-        assert obj.remote.asdf() is obj.remote
-        assert obj.remote.asdf().asdf() is obj.remote
+        assert obj.remote.chain() is obj.remote
+        assert obj.remote.chain().chain() is obj.remote
 
 
 def test_super():
+    '''Test that super attribute will call subsequent attributes on the super obj.
+
+    Checks: o.super.asdf()
+
+    TODO: test multiple supers. I don't think this will work atm.
+    '''
     obj = ObjectB()
     with remoteobj.util.dummy_listener(obj):
-        assert super(type(obj), obj).zxcv == obj.remote.super.zxcv.get_() == obj.x/5
+        assert super(type(obj), obj).zxcv == obj.remote.super.zxcv.get_() == 2
 
 
-def test_passto():
+def test_call():
+    '''Test calling object as a function and passing obj to a function.
+
+    Checks: o(x), o.passto(x) (-> x(o))
+    '''
     obj = ObjectB()
     with remoteobj.util.dummy_listener(obj):
-        assert str(obj) == obj.remote.passto(str) == '<A x={} terminated={}>'.format(obj.x, obj.term)
-
-
-def test_state_toggle():
-    obj = ObjectB()
-    with remoteobj.util.dummy_listener(obj):
-        # local terminate
-        obj.terminate()
-        assert obj.remote.term.__ == False and obj.term == True
-        obj.start()
-        assert obj.remote.term.__ == False and obj.term == False
-
-        # remote terminate
-        obj.remote.terminate()
-        assert obj.remote.term.__ == True and obj.term == False
-        obj.remote.start()
-        assert obj.remote.term.__ == False and obj.term == False
-
-
-def test_setattr():
-    obj = ObjectB()
-    with remoteobj.util.dummy_listener(obj):
-        # remote setattr
-        obj.remote.term = True
-        assert isinstance(obj.remote.term, remoteobj.Proxy)
-        assert obj.remote.term.get_() == True and obj.term == False
-        obj.remote.term = False
-        assert obj.remote.term.get_() == False and obj.term == False
-
-        # local setattr
-        obj.term = True
-        assert obj.remote.term.get_() == False and obj.term == True
-        obj.term = False
-        assert obj.remote.term.get_() == False and obj.term == False
+        assert str(obj) == obj.remote.passto(str) == '<A x={}>'.format(obj.x)
 
 
 
@@ -130,9 +181,11 @@ def test_wait_until_listening():
     with remoteobj.util.process(_up_and_down, obj) as p:
         assert obj.remote.wait_until_listening(p)
 
+def test_wait_until_listening_fail():
+    obj = ObjectB()
     with remoteobj.util.process(_exit_early, obj) as p:
         with pytest.raises(RuntimeError):
-            obj.remote.wait_until_listening(p)
+            print('listening', obj.remote.wait_until_listening(p))
 
 
 def test_fulfill_final():
@@ -163,31 +216,22 @@ def test_eager_proxy():
 
 
 def _state_toggle_test(obj):
-    with obj.catch_:
-        # local terminate
-        obj.terminate()
-        assert obj.remote.term.get_() == False and obj.term == True
-        obj.start()
-        assert obj.remote.term.get_() == False and obj.term == False
-
-        # remote terminate
-        obj.remote.terminate()
-        assert obj.remote.term.get_() == True and obj.term == False
-        obj.remote.start()
-        assert obj.remote.term.get_() == False and obj.term == False
+    # attribute access
+    assert obj.remote.x.__ == 10
+    obj.remote.asdf()
+    assert obj.remote.x.__ == 20
+    obj.remote.asdf().asdf()
+    assert obj.remote.x.__ == 80
 
 
 def test_remote_clients():
     '''Determine if the remote instance can get data.'''
     obj = ObjectB()
-    obj.catch_ = remoteobj.Except()
-
     with remoteobj.util.dummy_listener(obj):
-        with remote_func(_state_toggle_test, obj) as (p, c1):
-            time.sleep(0.1)
-        assert c1.value > 0
-        print(obj.catch_)
-        obj.catch_.raise_any()
+        assert obj.remote.x.__ == 10
+        with remoteobj.util.process(_state_toggle_test, obj) as p:
+            pass
+        assert obj.remote.x.__ == 80
 
 
 
@@ -210,47 +254,31 @@ class Types:
 
 
 def _do_work(obj, k, type_, n=20):
-    with obj.catch_:
-        xs = [isinstance(obj.remote.attrs_(k).get_(), type_) for _ in range(n)]
-        return True
-    return False
+    xs = [obj.remote.attrs_(k)() for _ in range(n)]
+    print(xs, k, type_)
+    assert all(isinstance(x, type_) for x in xs)
 
 
 
 @contextmanager
-def remote_func(func, callback, *a, **kw):
+def remote_func(callback, *a, **kw):
     '''Run a function repeatedly in a separate process.
 
     '''
     count = mp.Value('i', 0)
     event = mp.Event()
-    with process(func, callback, event, count, *a, **kw) as p:
-        yield p, count
-        event.set()
+    with remoteobj.util.process(_run_remote_func, callback, event, count, *a, **kw) as p:
+        try:
+            yield p, count
+        finally:
+            event.set()
 
-def _run_remote_func(callback, event, count, *a, delay=1e-5, **kw):
+def _run_remote_func(callback, event, count, *a, delay=1e-3, **kw):
     while not event.is_set():
         if callback(*a, **kw) is False:
             return
         time.sleep(delay)
         count.value += 1
-
-
-def test_remote_exception():
-    '''Test that remote exceptions are thrown and that the original traceback is displayed.'''
-    obj = Types()
-    obj.catch_ = remoteobj.Except()
-
-    assert obj.remote._listening == False
-    with remoteobj.util.dummy_listener(obj):
-        assert obj.remote._listening == True
-
-        obj.catch_.raise_any()  # nothing
-        with remote_func(_do_work, obj, 'doesntexist', bool):
-            time.sleep(0.1)
-        print(obj.catch_)
-        with pytest.raises(AttributeError):
-            obj.catch_.raise_any()
 
 
 
@@ -259,9 +287,9 @@ def test_dueling_threads():
     obj = Types()
     obj.catch_ = remoteobj.Except()
 
-    assert obj.remote._listening == False
+    assert obj.remote.listening_ == False
     with remoteobj.util.dummy_listener(obj):
-        assert obj.remote._listening == True
+        assert obj.remote.listening_ == True
 
         with remote_func(_do_work, obj, 'boolean', bool) as (p, c1):
             with remote_func(_do_work, obj, 'string', str) as (p, c2):
@@ -275,68 +303,3 @@ def test_dueling_threads():
         assert c3.value > 0
 
         obj.catch_.raise_any()
-
-
-
-
-
-
-
-
-
-def _raise_stuff(catch):
-    with catch('overall'):
-        with catch:
-            raise AttributeError('a')
-        with catch():
-            raise KeyError('a')
-        with catch('init'):
-            raise ValueError('b')
-        for _ in range(5):
-            with catch('process'):
-                raise IndexError('c')
-        with catch('finish'):
-            raise RuntimeError('d')
-        with pytest.raises(AttributeError):
-            with catch(raises=True):
-                raise AttributeError('e')
-        with pytest.raises(AttributeError):
-            with catch(types=TypeError):
-                raise AttributeError('e')
-
-        with catch:
-            with catch(catch_once=False, raises=True):
-                raise TypeError('q')
-
-ALL_RAISED_ = {
-    None: [AttributeError('a'), KeyError('a'), AttributeError('e'), TypeError('q'), TypeError('q')],
-    'init': [ValueError('b')],
-    'process': [IndexError('c')]*5,
-    'finish': [RuntimeError('d')],
-    'overall': [],
-}
-N_RAISED_ = sum(1 for es in ALL_RAISED_.values() for e in es)
-
-def compare_excs(excs1, excs2):
-    return all(
-        type(e1) == type(e2) and str(e1) == str(e2)
-        for e1, e2 in zip(excs1 or (), excs2 or ()))
-
-def test_remote_named_exceptions():
-    catch = remoteobj.Except(raises=False)
-
-    with remoteobj.util.process(_raise_stuff, catch):
-        pass
-    print(catch)
-    for name, excs in ALL_RAISED_.items():
-        assert compare_excs(catch.group(name), excs)
-    assert len(catch.all()) == N_RAISED_
-
-def test_local_exceptions():
-    catch = remoteobj.LocalExcept(raises=False)
-
-    _raise_stuff(catch)
-    print(catch)
-    for name, excs in ALL_RAISED_.items():
-        assert compare_excs(catch.group(name), excs)
-    assert len(catch.all()) == N_RAISED_

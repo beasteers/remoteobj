@@ -8,19 +8,52 @@ import remoteobj
 
 
 class process(mp.Process):
-    def __init__(self, func, *a, process_kw=None, **kw):
+    '''multiprocessing.Process, but easier and more Pythonic.
+
+    What this provides:
+     - has a cleaner signature - `process(func, *a, **kw)`
+     - can be used as a context manager `with process(...):`
+     - pulls the process name from the function name by default
+     - defaults to `daemon=True`
+     - will raise the remote exception (using `remoteobj.Except()`)
+
+     Arguments:
+        func (callable): the process target function.
+        *args: the positional args to pass to `func`
+        results_ (bool): whether to pickle the return/yield values and send them
+            back to the main process.
+        timeout_ (float or None): how long to wait while joining?
+        raises_ (bool): Whether or not to raise remote exceptions after joining.
+            Default is True.
+        name_ (str): the process name. If None, the process name will use the
+            target function's name.
+        group_ (str): the process group name.
+        daemon_ (bool): whether or not the process should be killed automatically
+            when the main process exits. Default True.
+        **kwargs: the keyword args to pass to `func`
+    '''
+    def __init__(self, func, *a, results_=True, timeout_=None, raises_=True,
+                 name_=None, group_=None, daemon_=True, **kw):
         self.exc = remoteobj.Except()
-        process_kw = process_kw or {}
-        process_kw.setdefault('daemon', True)
+
         super().__init__(
-            target=self.exc.wrap(func),
-            args=a, kwargs=kw, **process_kw)
+            target=self.exc.wrap(func, result=results_),
+            args=a, kwargs=kw, name=name_,
+            group=group_, daemon=daemon_)
 
         # set a default name - _identity is set in __init__ so we have to
         # run it after
-        if 'name' not in process_kw:
+        if not name_:
             self._name = '{}-{}'.format(
-                func.__name__, ':'.join(str(i) for i in self._identity))
+                getattr(func, '__name__', None) or self.__class__.__name__,
+                ':'.join(str(i) for i in self._identity))
+
+        self.join_timeout = timeout_
+        self.join_raises = raises_
+
+    def start(self):
+        super().start()
+        return self
 
     def __enter__(self):
         self.start()
@@ -29,20 +62,31 @@ class process(mp.Process):
     def __exit__(self, exc_type, exc_value, exc_tb):
         self.join()
 
-    def join(self, raises=True):
-        super().join()
-        if raises:
+    def join(self, timeout=None, raises=None):
+        super().join(self.join_timeout if timeout is None else timeout)
+        if (self.join_raises if raises is None else raises):
             self.exc.raise_any()
+
+    @property
+    def result(self):
+        return self.exc.get_result()
 
 
 
 # Helpers for tests and what not
 
 
-
-def dummy_listener(obj, bg=False, **kw):
-    '''Start a background process with obj.remote listening.'''
-    return _remote_listener(obj, bg if callable(bg) else _run_remote_bg if bg else _run_remote, **kw)
+@contextmanager
+def dummy_listener(obj, bg=True, wait=True, **kw):
+    func = bg if callable(bg) else _run_remote_bg if bg else _run_remote
+    event = mp.Event()
+    with process(func, obj, event, **kw) as p:
+        try:
+            if wait:
+                obj.remote.wait_until_listening()
+            yield p
+        finally:
+            event.set()
 
 
 def listener_func(func):
@@ -57,83 +101,13 @@ def listener_func(func):
 
 def _run_remote(obj, event, callback=None, init=None, cleanup=None, delay=1e-5):  # some remote job
     with obj.remote:
-        it = range(10)
-        init and init(obj)
         while not event.is_set():
             obj.remote.poll()
             callback and callback(obj)
             time.sleep(delay)
-        cleanup and cleanup(obj)
 
 def _run_remote_bg(obj, event, callback=None, delay=1e-5):  # some remote job
-    with obj.remote.background_listen():
+    with obj.remote.listen_(bg=True):
         while not event.is_set():
             callback and callback(obj)
             time.sleep(delay)
-
-
-@contextmanager
-def _remote_listener(obj, bg=True, wait=True, **kw):
-    func = bg if callable(bg) else _run_remote_bg if bg else _run_remote
-    event = mp.Event()
-    with process(func, obj, event, **kw) as p:
-        if wait:
-            obj.remote.wait_until_listening()
-        yield p
-        event.set()
-
-
-
-
-# Passing single values between processes
-
-
-
-
-class AnyValue:
-    '''Pass arbitrary values by pickling. Because of FIFO, it's inefficient to
-    send big objects, especially if this value is being read across many processes.
-    This is meant more for Exceptions and things like that.'''
-    def __init__(self, initval=None):
-        self._value = initval
-        self._count = 0
-        self._q = mp.SimpleQueue()
-        self._q.put(self._value)
-        self._qcount = mp.Value('i', self._count)
-
-    @property
-    def value(self):
-        if self._count != self._qcount.value:
-            self._value = self._q.get()
-            self._count = self._qcount.value
-            self._q.put(self._value)  # replace value
-        return self._value
-
-    @value.setter
-    def value(self, value):
-        while not self._q.empty():
-            self._q.get()
-        self._q.put(value)
-        self._qcount.value += 1
-
-
-class AnyValueProp(AnyValue):
-    '''An alternative interface for AnyValue that uses class descriptors.'''
-    def __init__(self, name=None):
-        if not name:
-            name = '_{}{}'.format(self.__class__.__name__, id(self))
-        self.name = '_{}'.format(name) if not name.startswith('_') else name
-
-    def __get__(self, instance, owner=None):
-        return self._get(instance).value
-
-    def __set__(self, instance, value):
-        self._get(instance).value = value
-
-    def _get(self, instance):
-        try:
-            value = getattr(instance, self.name)
-        except KeyError:
-            value = AnyValue()
-            setattr(instance, self.name, value)
-        return value

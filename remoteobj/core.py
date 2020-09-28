@@ -1,15 +1,15 @@
 import time
 import functools
 import collections
-# from contextlib import contextmanager
+from contextlib import contextmanager
 import threading
-import traceback
 import warnings
 import multiprocessing as mp
 from .view import View
+from .excs import RemoteException
 
 
-__all__ = ['Proxy', 'Except', 'LocalExcept', 'RemoteException']
+__all__ = ['Proxy']
 
 
 def make_token(name):
@@ -33,29 +33,23 @@ UNPICKLEABLE_WARNING = (
 )
 
 
-# https://github.com/python/cpython/blob/5acc1b5f0b62eef3258e4bc31eba3b9c659108c9/Lib/concurrent/futures/process.py#L127
-class _RemoteTraceback(Exception):
-    def __init__(self, tb):
-        self.tb = tb
-    def __str__(self):
-        return self.tb
-
-class RemoteException:
-    def __init__(self, exc):
-        self.exc = exc
-        self.tb = '\n"""\n{}"""'.format(''.join(
-            traceback.format_exception(type(exc), exc, exc.__traceback__)
-        ))
-    def __reduce__(self):
-        return _rebuild_exc, (self.exc, self.tb)
-
-def _rebuild_exc(exc, tb):
-    exc.__cause__ = _RemoteTraceback(tb)
-    return exc
-
-
 class Proxy(View):
     '''Capture and apply operations to a remote object.
+
+    Arguments:
+    instance (any): the object that you want to proxy.
+    default (any): the default value to return if no remote listener is
+        running and if the proxy call doesn't specify its own default.
+        If omitted, it will raise a RuntimeError (default). This is most likely
+        the expected behavior in a general sense so if you want default
+        values, it is recommended that you override them on a per-call
+        basis.
+    eager_proxy (bool): whether certain ops should evaluate automatically.
+        These include: __call__, and passto. Default True.
+    fulfill_final (bool): If when closing the remote listener, there are pending
+        requests, should the remote listener fulfill the requests or should it
+        cancel them. By default, it will fulfill them, but if there are problems
+        with that, you can disable that.
 
     Usage:
     >>> proxy = Proxy(list)
@@ -133,10 +127,13 @@ class Proxy(View):
     # parent calling interface
 
     def get_(self, default=UNDEFINED):
+        '''Request the remote object to evaluate the proxy and return the value.
+        If you are in the same process as the remote object, it will evaluate
+        directly.'''
         if self._local_listener:  # if you're in the remote process, just run the function.
             return self.resolve_view(self._obj)
         with self._llock:
-            if self._listening:  # if the remote process is listening, run
+            if self.listening_:  # if the remote process is listening, run
                 # send and wait for a result
                 self._local.send(self._keys)
                 x = self._local.recv()
@@ -156,7 +153,7 @@ class Proxy(View):
 
     @property
     def __(self):
-        '''Get value from remote object. Alias for self.get_()'''
+        '''Get value from remote object. Alias for self.get_().'''
         return self.get_()
 
     @property
@@ -169,6 +166,8 @@ class Proxy(View):
     def _extend(self, *keys, **kw):
         # Create a new remote proxy object while **bypassing RemoteProxy.__init__**
         # Basically, we don't want to recreate pipes, locks, etc.
+        if self._frozen:
+            raise TypeError(f'{self} is frozen and is not extendable.')
         obj = self.__class__.__new__(self.__class__)
         obj.__dict__.update(self.__dict__)
         View.__init__(obj, *self._keys, *keys, **kw)
@@ -181,35 +180,63 @@ class Proxy(View):
             val = val.get_(default=_default)
         return val
 
+    # attribute
+
+    def _check_attr(self, name):
+        '''Determine if an attribute is one we should override.'''
+        return (name.startswith('_') or name in self.__dict__ or
+                name in self.__class__.__dict__)
+
     def __setattr__(self, name, value):
         '''Support setting attributes on remote objects. This makes me uncomfy lol.'''
-        if (name.startswith('_') or name in self.__dict__ or
-                name in self.__class__.__dict__):
+        if self._check_attr(name):
             return super().__setattr__(name, value)
         self._setattr(name, value).get_()
+
+    def __delattr__(self, name):
+        '''Support deleting attributes on remote objects. This makes me uncomfy too lol.'''
+        if self._check_attr(name):
+            return super().__delattr__(name)
+        self._delattr(name).get_()
+
+    # keys
 
     def __setitem__(self, name, value):
         '''Set item on remote object.'''
         self._setitem(name, value).get_()
 
+    def __delitem__(self, name):
+        '''Delete item on remote object.'''
+        self._delitem(name).get_()
+
+    # other
+
     def passto(self, func, *a, _default=None, _proxy=None, **kw):
+        '''Pass the object to a function as the first argument.
+        e.g. obj.remote.passto(len) => len(obj)
+        '''
         val = super().passto(func, *a, **kw)
         if (self._eager_proxy if _proxy is None else _proxy):
             val = val.get_(default=_default)
         return val
 
+    def __contains__(self, key):
+        return super().__contains__(key).get_()
+
+    def __len__(self):
+        return self._len().get_()
 
     # running state - to avoid dead locks, let the other process know if you will respond
 
     @property
-    def _listening(self):
+    def listening_(self):
         '''Is the remote instance listening?'''
         return bool(self._listening_val.value)
 
-    @_listening.setter
-    def _listening(self, value):
+    @listening_.setter
+    def listening_(self, value):
         # set first so no one else can
-        prev = self._listening
+        prev = self.listening_
         self._listening_val.value = int(value)
         self._listener_process_name = mp.current_process().name if value else None
         # make sure no one is left waiting.
@@ -225,193 +252,86 @@ class Proxy(View):
     '''
 
     do (clean, easy, runs in background)
-    >>> with self.remote.background_listen():  # automatic
+    >>> with self.remote.listen_(bg=True):  # automatic
     ...     ...  # don't have to poll
 
     or (runs in background, manual cleanup)
-    >>> self.remote.background_listen()  # automatic
+    >>> self.remote.listen_(bg=True)  # automatic
     >>> ...  # don't have to poll
-    >>> self.remote.background_stop()
+    >>> self.remote.stop_listen_()
 
     or (clean, easy, more control)
-    >>> with self.remote:  # manual
+    >>> with self.remote.listen_():  # manual
     ...     while True:
     ...         self.remote.poll()  # need to poll, otherwise they'll hang
 
     or when you've got nothing else to do
-    >>> self.remote.run_listener()
+    >>> self.remote._run_listener()
 
     '''
 
-    def background_listen(self):
-        '''Start listening. By default, this will launch in a background thread.'''
+    _thread_exception = None
+    def listen_(self, bg=False):
+        '''Start a background thread to handle requests.'''
+        self._thread_exception = None
+        if not bg:
+            self.listening_ = True
+            return
+
         if self._thread is None:
-            self._thread = threading.Thread(target=self.run_listener, daemon=True)
+            self._thread = threading.Thread(
+                target=self._run_listener, kwargs={'_catch_exc': True}, daemon=True)
             self._thread.start()
         return self
 
-    def background_stop(self):
-        self._listening = False
+    def stop_listen_(self):
+        '''Set listening to False. If a thread is running, close it.'''
+        self.listening_ = False
         if self._thread is not None:
             self._thread.join()
         self._thread = None
+        if self._thread_exception is not None:
+            raise self._thread_exception
         return self
 
-    def run_listener(self):
+    def _run_listener(self, _catch_exc=True):
+        '''Run the listener loop. This is what is run in the thread.'''
         try:
-            self._listening = True
-            while self._listening:
+            self.listening_ = True
+            while self.listening_:
                 self.process_requests()
                 time.sleep(self._delay)
+        except Exception as e:
+            if not _catch_exc:
+                raise
+            self._thread_exception = e
         finally:
-            self._listening = False
+            self.listening_ = False
 
     def wait_until_listening(self, proc=None, fail=True):
-        while True:
-            if self._listening:
-                return True
+        '''Wait until the remote instance is listening.
+
+        Arguments:
+            proc (mp.Process): If passed and the process dies, raise an error.
+            fail (bool): Should it raise an
+
+        Returns:
+            Whether the process is listening.
+
+        Raises:
+            RuntimeError if fail == True and not proc.is_alive()
+        '''
+        while not self.listening_:
             if proc is not None and not proc.is_alive():
                 if fail:
                     raise RuntimeError('Process is dead and the proxy never started listening.')
                 return False
             time.sleep(self._delay)
+        return True
 
     def __enter__(self):
-        self._listening = True
+        self.listening_ = True
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.background_stop()
-        self._listening = False
-
-    def with_listener(self, func):
-        return functools.wraps(func)(
-            functools.partial(self._with_listener_wrap, func))
-
-    def _with_listener_wrap(self, func, *a, **kw):
-        with self.background_listen():
-            return func(*a, **kw)
-
-
-
-class LocalExcept:
-    '''Catch exceptions in a remote process with their traceback and send them
-    back to be raised properly in the main process.'''
-    def __init__(self, *types, raises=False, catch_once=True):
-        self._local, self._remote = mp.Pipe()
-        self.types = types or (Exception,)
-        self.raises = raises
-        self.catch_once = catch_once
-        self._groups = {}
-        self._excs = {}
-
-    def __str__(self):
-        return '<{} raises={} types={}{}>'.format(
-            self.__class__.__name__, self.raises, self.types,
-            ''.join(
-                '\n {:>15} [{} raised]{}'.format(
-                    '*default*' if name is None else name, len(excs),
-                    (' - last: ({}: {!r})'.format(type(excs[-1]).__name__, str(excs[-1]))
-                     if excs else '')
-                )
-                for name, excs in self._groups.items()
-            )
-        )
-
-    def __call__(self, name=None, raises=None, types=None, catch_once=None):
-        return _ExceptContext(
-            self, name,
-            self.raises if raises is None else raises,
-            self.types if types is None else types,
-            self.catch_once if catch_once is None else catch_once)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        return self().__exit__(exc_type, exc_val, exc_tb)
-
-    def set(self, exc, name=None, mark=True):
-        if name not in self._groups:
-            self._groups[name] = []
-        self._groups[name].append(exc)
-        self._excs[name] = exc
-        if mark:
-            exc.__remoteobj_caught__ = name
-
-    def get(self, name=None):
-        return self._excs.get(name)
-
-    def group(self, name=None):
-        return self._groups.get(name)
-
-    def raise_any(self, name=...):
-        exc = self.get(name) if name != ... else next(iter(self.all()), None)
-        if exc is not None:
-            raise exc
-
-    def all(self):
-        return [e for es in self._groups.values() for e in es]
-
-    def clear(self):
-        self._groups.clear()
-        self._excs.clear()
-
-    def wrap(self, func):
-        return functools.wraps(func)(
-            functools.partial(self._func_wrapper, func))
-
-    def _func_wrapper(self, func, *a, **kw):
-        with self(raises=False):
-            return func(*a, **kw)
-
-
-class Except(LocalExcept):
-    def __init__(self, *types, **kw):
-        self._local, self._remote = mp.Pipe()
-        super().__init__(*types, **kw)
-
-    def __str__(self):
-        self.pull()
-        return super().__str__()
-
-    def get(self, name=None):
-        self.pull()
-        return super().get(name)
-
-    def group(self, name=None):
-        self.pull()
-        return super().group(name)
-
-    def all(self):
-        self.pull()
-        return super().all()
-
-    def set(self, exc, name=None, mark=True):
-        self._remote.send((
-            RemoteException(exc) if isinstance(exc, BaseException) else exc, name))
-        if mark:
-            exc.__remoteobj_caught__ = name
-
-    def pull(self):
-        '''Pull any exceptions through the pipe.'''
-        while self._local.poll():
-            exc, name = self._local.recv()
-            super().set(exc, name)
-
-
-class _ExceptContext:
-    def __init__(self, catch, name=None, raises=False, types=(), catch_once=True):
-        self.catch = catch
-        self.name = name
-        self.raises = raises or not catch_once
-        self.types = types
-        self.catch_once = catch_once
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_val is not None and isinstance(exc_val, self.types):
-            self.catch.set(exc_val, self.name, self.catch_once)
-            return not self.raises
+        self.stop_listen_()
