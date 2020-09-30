@@ -1,7 +1,5 @@
 import time
-import functools
 import collections
-from contextlib import contextmanager
 import threading
 import warnings
 import multiprocessing as mp
@@ -9,7 +7,12 @@ from .view import View
 from .excs import RemoteException
 
 
-__all__ = ['Proxy']
+__all__ = ['get', 'Proxy']
+
+
+def get(view, **kw):
+    '''Resolve a Proxy object and get its return value.'''
+    return view.get_(**kw)
 
 
 def make_token(name):
@@ -39,26 +42,29 @@ class Proxy(View):
     Arguments:
     instance (any): the object that you want to proxy.
     default (any): the default value to return if no remote listener is
-        running and if the proxy call doesn't specify its own default.
-        If omitted, it will raise a RuntimeError (default). This is most likely
-        the expected behavior in a general sense so if you want default
-        values, it is recommended that you override them on a per-call
-        basis.
-    eager_proxy (bool): whether certain ops should evaluate automatically.
-        These include: __call__, and passto. Default True.
-    fulfill_final (bool): If when closing the remote listener, there are pending
-        requests, should the remote listener fulfill the requests or should it
-        cancel them. By default, it will fulfill them, but if there are problems
-        with that, you can disable that.
+    Args:
+        instance (any): the object that you want to proxy.
+        default (any): the default value to return if no remote listener is
+            running and if the proxy call doesn't specify its own default.
+            If omitted, it will raise a RuntimeError (default). This is most likely
+            the expected behavior in a general sense so if you want default
+            values, it is recommended that you override them on a per-call
+            basis.
+        eager_proxy (bool): whether certain ops should evaluate automatically.
+            These include: __call__, and passto. Default True.
+        fulfill_final (bool): If when closing the remote listener, there are pending
+            requests, should the remote listener fulfill the requests or should it
+            cancel them. By default, it will fulfill them, but if there are problems
+            with that, you can disable that.
 
     Usage:
     >>> proxy = Proxy(list)
+    >>> # send to remote process ...
     >>> proxy.append(5)
     >>> assert proxy.passto(len) == 1  # len(proxy)
     >>> assert proxy[0].get_() == 5    # proxy[0]
     >>> proxy[0] = 6
     >>> assert proxy[0].__ == 6        # proxy[0] - same as get_()
-
     >>> proxy.another = []
     >>> assert isinstance(proxy.another, Proxy)
     >>> assert isinstance(proxy.append, Proxy)
@@ -68,7 +74,7 @@ class Proxy(View):
     _thread = None
     _delay = 1e-5
     _listener_process_name = None
-    NOCOPY = ['_local', '_remote', '_llock', '_rlock', '_listening_val']
+    _NOCOPY = ['_local', '_remote', '_llock', '_rlock', '_listening_val']
     def __init__(self, instance, default=UNDEFINED, eager_proxy=True, fulfill_final=True, **kw):
         super().__init__(**kw)
         self._obj = instance
@@ -132,7 +138,11 @@ class Proxy(View):
     def get_(self, default=UNDEFINED):
         '''Request the remote object to evaluate the proxy and return the value.
         If you are in the same process as the remote object, it will evaluate
-        directly.'''
+        directly.
+
+        Args:
+            default (any): the value to return if the remote instance isn't listening.
+        '''
         if self._local_listener:  # if you're in the remote process, just run the function.
             return self.resolve_view(self._obj)
         with self._llock:
@@ -216,7 +226,7 @@ class Proxy(View):
 
     def passto(self, func, *a, _default=None, _proxy=None, **kw):
         '''Pass the object to a function as the first argument.
-        e.g. obj.remote.passto(len) => len(obj)
+        e.g. `obj.remote.passto(str) => len(str)`
         '''
         val = super().passto(func, *a, **kw)
         if (self._eager_proxy if _proxy is None else _proxy):
@@ -314,15 +324,16 @@ class Proxy(View):
     def wait_until_listening(self, proc=None, fail=True):
         '''Wait until the remote instance is listening.
 
-        Arguments:
+        Args:
             proc (mp.Process): If passed and the process dies, raise an error.
-            fail (bool): Should it raise an
+            fail (bool): Should it raise an exception if the process dies?
+                Otherwise it would just return `False`.
 
         Returns:
             Whether the process is listening.
 
         Raises:
-            RuntimeError if fail == True and not proc.is_alive()
+            `RuntimeError if fail == True and not proc.is_alive()`
         '''
         while not self.listening_:
             if proc is not None and not proc.is_alive():

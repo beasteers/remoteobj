@@ -5,6 +5,7 @@
  - removing second dict from Except that stored the latest exception - redundant, let's us allow customization
  - renaming `util.dummy_listener` => `util.listener` for possible public use
  - fix listener bg=True potential hang on background exception
+ - started on api doc generation
 
 # 0.2.2
  - fix `listen_(bg=False)` bug causing deadlock

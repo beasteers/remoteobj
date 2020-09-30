@@ -176,7 +176,7 @@ class View:
     def attrs_(self, *keys):
         '''Access nested attributes using strings.
         e.g.
-            x.attrs_('adsf') == x.asdf
-            x.attrs_('adsf.zxcv', 'sdfg', 'sdfg.sfg') == x.adsf.zxcv.sdfg.sdfg.sfg
+         - `x.attrs_('adsf') == x.asdf`
+         - `x.attrs_('adsf.zxcv', 'sdfg', 'sdfg.sfg') == x.adsf.zxcv.sdfg.sdfg.sfg`
         '''
         return self._extend(*(('.', k) for ks in keys for k in ks.split('.')))

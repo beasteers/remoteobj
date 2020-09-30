@@ -37,8 +37,8 @@ def _rebuild_exc(exc, tb):
 class LocalExcept:
     '''Catch exceptions and store them in groups.
 
-    Arguments:
-        *types (*Exception): Specific exceptions you want to catch. Defaults to Exception.
+    Args:
+        *types: Specific exceptions you want to catch. Defaults to `Exception`.
         raises (bool): If True, the object is taking a bookkeeping role and tracking
             where exceptions are raised, but will allow the original try, finally
             flow to take place. If False, it will swallow the exception.
@@ -156,6 +156,7 @@ class LocalExcept:
             return x
 
     def set_result(self, x):
+        '''Set a function's result.'''
         if hasattr(x,'__iter__') and not hasattr(x,'__len__'):
             try:
                 for xi in x:
@@ -166,6 +167,7 @@ class LocalExcept:
             self.set(x, '__return__')
 
     def get_result(self, delay=1e-6):
+        '''Retrieve a function's result.'''
         if self._is_yield:
             def results():
                 while True:
@@ -209,7 +211,7 @@ class Except(LocalExcept):
         super().set(exc, name, mark=mark)
 
     def pull(self):
-        '''Pull any exceptions through the pipe.'''
+        '''Pull any exceptions through the pipe. Used internally.'''
         while self._local.poll():
             exc, name = self._local.recv()
             super().set(exc, name)
