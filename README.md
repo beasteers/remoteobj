@@ -1,17 +1,90 @@
 # remoteobj
 Interacting with objects across processes.
 
-This uses multiprocessing pipes to send messages and operations from the main process to the remote process.
+This uses multiprocessing pipes to send messages and operations from the main process to the remote process and send back the return value.
 
 Basically this lets do things like call `.close()` or `.pause()`, or `.ready` on an object that was sent to another process. But it also supports more than that!
 
 What's included:
  - [Proxy](#example): remote proxy for communicating with forked objects. This was the initial purpose of this package
- - [util.process](#enhanced-processes): `multiprocessing.Process` but with fewer hurdles. Makes it more like you're writing normal python. Handles remote exceptions and
- - [Except](#sending-process-exceptions): context manager for capturing remote exceptions, assigning them to different groups, and sending them to the main process
- - [LocalExcept](#local-exceptions): the same context manager interface but without the inter-process communication
+    ```python
+    class Blah:
+        def __init__(self):
+            self.remote = remoteobj.Proxy(self)
+        def say_hi(self):
+            print('hi from', mp.current_process().name)
+        def run(self):  # remote process function
+            with self.remote.listen_():
+                while True:
+                    ... # do other stuff
+                    self.remote.process_requests()
 
-> **NOTE:** This is still very much in alpha and the interface is still evolving so be sure to pin a version. Also, let me know if you have thoughts/suggestions/requests! For info on how this works, see [here](#how-proxy-works)
+    obj = Blah()
+    mp.Process(target=obj.run).start()
+    obj.remote.wait_until_listening()
+    obj.remote.say_hi()
+    # hi from Process-1
+    ...
+    ```
+ - [util.process](#enhanced-processes): `multiprocessing.Process` but with fewer hurdles. Makes it more like you're writing normal python. Handles remote exceptions and return/yield values.
+     ```python
+     def func(x):
+         yield from range(x)
+         raise ValueError('error from {}'.format(
+            mp.current_process().name))
+
+    try:
+        with remoteobj.util.process(func, 4) as p:
+            for i in p.result:
+                print(i)
+    except ValueError as e:
+        print('woah!!', e)
+    # prints 0, 1, 2, 3, woah!! error from Process-1
+     ```
+ - [Except](#sending-process-exceptions): context manager for capturing remote exceptions, assigning them to different groups, and sending them back to the main process
+    ```python
+    exc = remoteobj.Except()
+
+    def remote_func(exc):
+        with exc(raises=False):
+            try:
+                with exc('init'):
+                    do_init()
+                with exc('work'):
+                    do_work()
+            finally:
+                with exc('cleanup'):
+                    do_cleanup()
+
+    p = mp.Process(target=remote_func, args=(exc,))
+    p.start()
+    ...
+    p.join()
+    exc.raise_any('work')  # if none, its a noop
+    exc.raise_any('cleanup')
+    exc.raise_any()  # will raise the last caught exception
+    ```
+ - [LocalExcept](#local-exceptions): the same context manager interface but without the inter-process communication
+     ```python
+     exc = remoteobj.LocalExcept()
+
+     with exc(raises=False):
+         try:
+             with exc('init'):
+                 do_init()
+             do_other_stuff()
+             with exc('work'):
+                 do_work()
+         finally:
+             with exc('cleanup'):
+                 do_cleanup()
+
+     exc.raise_any('work')
+     exc.raise_any('cleanup')
+     exc.raise_any()
+     ```
+
+> **NOTE:** This is still in alpha and the interface is still evolving (though things are starting to stabilize) so be sure to pin a version or stay up to date with changes. Also, let me know if you have thoughts/suggestions/requests! For info on how this works, see [here](#how-proxy-works)
 
 ## Install
 
@@ -19,7 +92,7 @@ What's included:
 pip install remoteobj
 ```
 
-## Example
+## Full Example (Proxy)
 Here we have an object that we want to run in a separate process. We want to be able to get/set the object's state as it's running so we wrap the object in a remote `Proxy` object which will run in the background of the remote process and execute the calls that we make in the main process.
 ```python
 import time
@@ -40,7 +113,7 @@ class Object:
         '''Remote process'''
         # starts thread to execute requests
         with self.remote.listen_(bg=True):
-            while not self.stop:
+            while not self.stop and self.remote.listening_:
                 if self.on:
                     self.count += 1
                 time.sleep(0.1)
@@ -110,9 +183,7 @@ r_obj = obj.remote = remoteobj.Proxy(obj)
 # call a method
 r_obj.append(5)
 # now the remote object has 5 appended to it
-assert r_obj.passto(len) == 1
-# NOTE: this is equivalent to len(obj)
-
+assert len(r_obj) == 1
 
 # getting an attribute returns a proxy so you can chain
 assert isinstance(r_obj.another.append, remoteobj.Proxy)
@@ -137,6 +208,21 @@ assert r_obj[0].get_() == 5
 # you can even set keys and attributes on remote objects
 r_obj[0] = 6
 r_obj.something = 10
+
+
+# len() is a special case, but in most cases, you can't
+# just blindly pass a remote object to a function and
+# expect it to work all the time.
+assert str(r_obj) == <Remote <Idk object at ...> : (?)>
+assert r_obj.passto(str) == <Idk object at ...>
+# the first is the local instance, while the second is the
+# remote instance. To pass an object to a function to execute
+# on the remote side, use `passto` which will pickle the function
+# reference.
+# So you probably wouldn't want to pass an object method like that
+# because it would pickle and unpickle the object instance which
+# is most likely **not** what you want.
+# but I'm not your mom.
 ```
 
 >**NOTE:** you cannot get/set attributes that begin with an underscore. All underscore attributes reference the proxy object itself.

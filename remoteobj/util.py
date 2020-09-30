@@ -77,10 +77,15 @@ class process(mp.Process):
 
 
 @contextmanager
-def dummy_listener(obj, bg=True, wait=True, **kw):
-    func = bg if callable(bg) else _run_remote_bg if bg else _run_remote
+def listener(obj, bg=None, wait=True, callback=None, **kw):
+    if bg is None:
+        bg = callable(callback)
+    func = (
+        bg if callable(bg) else
+        _run_remote_bg if bg else
+        _run_remote)
     event = mp.Event()
-    with process(func, obj, event, **kw) as p:
+    with process(func, obj, event, callback=callback, **kw) as p:
         try:
             if wait:
                 obj.remote.wait_until_listening()
@@ -88,6 +93,7 @@ def dummy_listener(obj, bg=True, wait=True, **kw):
         finally:
             event.set()
 
+dummy_listener = listener
 
 def listener_func(func):
     '''Wrap a function that get's called repeatedly in a remote process with
@@ -95,11 +101,11 @@ def listener_func(func):
     '''
     @functools.wraps(func)
     def inner(obj, *a, **kw):
-        return dummy_listener(obj, *a, callback=func, **kw)
+        return listener(obj, *a, callback=func, **kw)
     return inner
 
 
-def _run_remote(obj, event, callback=None, init=None, cleanup=None, delay=1e-5):  # some remote job
+def _run_remote(obj, event, callback=None, delay=1e-5):  # some remote job
     with obj.remote:
         while not event.is_set():
             obj.remote.poll()
@@ -108,6 +114,6 @@ def _run_remote(obj, event, callback=None, init=None, cleanup=None, delay=1e-5):
 
 def _run_remote_bg(obj, event, callback=None, delay=1e-5):  # some remote job
     with obj.remote.listen_(bg=True):
-        while not event.is_set():
+        while not event.is_set() and obj.remote.listening_:
             callback and callback(obj)
             time.sleep(delay)

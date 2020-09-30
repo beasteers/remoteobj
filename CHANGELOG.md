@@ -1,3 +1,11 @@
+# 0.2.3
+ - added super simple examples for each at the top of the README to illustrate
+ - fixed unpickleable bug TODO add test
+ - fixed bug when using except on a generator, then a function.
+ - removing second dict from Except that stored the latest exception - redundant, let's us allow customization
+ - renaming `util.dummy_listener` => `util.listener` for possible public use
+ - fix listener bg=True potential hang on background exception
+
 # 0.2.2
  - fix `listen_(bg=False)` bug causing deadlock
 

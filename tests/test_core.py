@@ -30,13 +30,15 @@ class ObjectA:
 
     @property
     def zxcv(self):
+        return 8
+
+    def override(self):
         return 2
 
 
 class ObjectB(ObjectA):
-    @property
-    def zxcv(self):
-        return 8
+    def override(self):
+        return 10
 
 
 def test_get():
@@ -45,7 +47,7 @@ def test_get():
     Checks: remoteobj.get(o), o.get_(), o.get_(default=...), o.__
     '''
     obj = ObjectB()
-    with remoteobj.util.dummy_listener(obj):
+    with remoteobj.util.listener(obj):
         assert remoteobj.get(obj.remote.x) == obj.x
         assert obj.remote.x.get_() == obj.x
         assert obj.remote.x.__ == obj.x
@@ -63,11 +65,11 @@ def test_bg_listener(bg):
     Checks: Proxy.background_listen()
     '''
     obj = ObjectB()
-    with remoteobj.util.dummy_listener(obj, bg=bg):
+    with remoteobj.util.listener(obj, bg=bg):
         assert obj.remote.x.__ == 10
 
     with pytest.raises(KeyError):
-        with remoteobj.util.dummy_listener(obj, bg=bg):
+        with remoteobj.util.listener(obj, bg=bg):
             obj.remote.error()
 
 
@@ -78,7 +80,7 @@ def test_attr():
     '''
     obj = ObjectB()
     obj.y = 5
-    with remoteobj.util.dummy_listener(obj):
+    with remoteobj.util.listener(obj):
         # remote setattr
         obj.remote.y = 6
         assert isinstance(obj.remote.y, remoteobj.Proxy)
@@ -116,7 +118,7 @@ def test_getset_item():
     Checks: o[x], o[x] = y, del o[x], x in o, len(o)
     '''
     obj = ObjectB()
-    with remoteobj.util.dummy_listener(obj):
+    with remoteobj.util.listener(obj):
         assert 'a' in obj.remote.data
         assert obj.remote.data.passto(list) == ['a']
         assert obj.remote.data['a'].__ == 5
@@ -140,7 +142,7 @@ def test_chaining():
     Checks: return self -> value = SELF -> self if value == SELF
     '''
     obj = ObjectB()
-    with remoteobj.util.dummy_listener(obj):
+    with remoteobj.util.listener(obj):
         assert obj.remote.chain() is obj.remote
         assert obj.remote.chain().chain() is obj.remote
 
@@ -153,8 +155,9 @@ def test_super():
     TODO: test multiple supers. I don't think this will work atm.
     '''
     obj = ObjectB()
-    with remoteobj.util.dummy_listener(obj):
-        assert super(type(obj), obj).zxcv == obj.remote.super.zxcv.get_() == 2
+    with remoteobj.util.listener(obj):
+        assert obj.override() == obj.remote.override() == 10
+        assert super(type(obj), obj).override() == obj.remote.super.override() == 2
 
 
 def test_call():
@@ -163,7 +166,7 @@ def test_call():
     Checks: o(x), o.passto(x) (-> x(o))
     '''
     obj = ObjectB()
-    with remoteobj.util.dummy_listener(obj):
+    with remoteobj.util.listener(obj):
         assert str(obj) == obj.remote.passto(str) == '<A x={}>'.format(obj.x)
 
 
@@ -206,11 +209,11 @@ def test_fulfill_final():
 
 def test_eager_proxy():
     obj = ObjectB()
-    with remoteobj.util.dummy_listener(obj):
+    with remoteobj.util.listener(obj):
         assert isinstance(obj.remote.inc(), int)
 
     obj = ObjectB(eager_proxy=False)
-    with remoteobj.util.dummy_listener(obj):
+    with remoteobj.util.listener(obj):
         assert isinstance(obj.remote.inc(), remoteobj.Proxy)
 
 
@@ -227,7 +230,7 @@ def _state_toggle_test(obj):
 def test_remote_clients():
     '''Determine if the remote instance can get data.'''
     obj = ObjectB()
-    with remoteobj.util.dummy_listener(obj):
+    with remoteobj.util.listener(obj):
         assert obj.remote.x.__ == 10
         with remoteobj.util.process(_state_toggle_test, obj) as p:
             pass
@@ -288,7 +291,7 @@ def test_dueling_threads():
     obj.catch_ = remoteobj.Except()
 
     assert obj.remote.listening_ == False
-    with remoteobj.util.dummy_listener(obj):
+    with remoteobj.util.listener(obj):
         assert obj.remote.listening_ == True
 
         with remote_func(_do_work, obj, 'boolean', bool) as (p, c1):

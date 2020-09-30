@@ -27,6 +27,14 @@ def test_process_context_error():
             raise IndexError('error')
 
 
+def test_process_bad_func():
+    '''Test how it reacts when a bad function is passed.
+    '''
+    with pytest.raises(TypeError):
+        with remoteobj.util.process(True):
+            pass
+
+
 def _return(x, y):
     return x + y
 

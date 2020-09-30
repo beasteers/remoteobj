@@ -47,8 +47,7 @@ class LocalExcept:
             will ignore that exception. If False, every context up the chain
             will record the exception.
     '''
-    _first = None
-    _last = None
+    _first = _last = None
     _result = None
     _is_yield = _is_yielding = False
     def __init__(self, *types, raises=True, catch_once=True):
@@ -57,7 +56,6 @@ class LocalExcept:
         self.raises = raises
         self.catch_once = catch_once
         self._groups = {}
-        self._excs = {}
 
     def __str__(self):
         return '<{} raises={} types={}{}>'.format(
@@ -108,16 +106,16 @@ class LocalExcept:
         if name not in self._groups:
             self._groups[name] = []
         self._groups[name].append(exc)
-        self._excs[name] = exc
         if self._first is None:
             self._first = exc
         self._last = exc
         if mark:
             exc.__remoteobj_caught__ = name
 
-    def get(self, name=None):
+    def get(self, name=None, latest=True):
         '''Get the last exception in the specified group, `name`.'''
-        return self._excs.get(name)
+        excs = self.group(name)
+        return excs[-1 if latest else 0] if excs else None
 
     def group(self, name=None):
         '''Get all exceptions in a group, `name`.'''
@@ -139,9 +137,9 @@ class LocalExcept:
     def clear(self):
         '''Clear all exceptions and groups collected so far.'''
         self._groups.clear()
-        self._excs.clear()
         self._first = self._last = None
         self._result = None
+        self._is_yield = self._is_yielding = False
 
     def wrap(self, func, result=True):
         '''Wrap a function to catch any exceptions raised. To re-raise the

@@ -125,7 +125,7 @@ class Proxy(View):
                         raise RuntimeError(
                             'Return value of {} is unpickleable.'.format(view)) from e
                     warnings.warn(UNPICKLEABLE_WARNING.format(view=view, result=result))
-                    self._remote.send((result, None))
+                    self._remote.send((None, None))
 
     # parent calling interface
 
