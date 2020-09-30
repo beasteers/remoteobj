@@ -16,7 +16,8 @@ def get(view, **kw):
 
 
 def make_token(name):
-    return '|(((( {} {} ))))|'.format(__name__.rsplit('.', 1)[0], name)
+    '''Generate a sentinel token. Used in places where `None` may be a valid input.'''
+    return '|{}.{}|'.format(__name__.rsplit('.', 1)[0], name)
 
 Result = collections.namedtuple('Result', 'result exception')
 
@@ -39,9 +40,6 @@ UNPICKLEABLE_WARNING = (
 class Proxy(View):
     '''Capture and apply operations to a remote object.
 
-    Arguments:
-    instance (any): the object that you want to proxy.
-    default (any): the default value to return if no remote listener is
     Args:
         instance (any): the object that you want to proxy.
         default (any): the default value to return if no remote listener is
