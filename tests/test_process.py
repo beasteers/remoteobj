@@ -6,15 +6,17 @@ import remoteobj
 def _error():
     raise KeyError('errorrr')
 
-def test_process_error():
+@pytest.mark.parametrize("threaded", [False, True])
+def test_process_error(threaded):
     '''Test that the remote error is raised in the main thread.'''
-    p = remoteobj.util.process(_error)
+    p = remoteobj.util.job(_error, threaded_=threaded)
     p.start()
     with pytest.raises(KeyError):
         p.join()
 
 
-def test_process_context_error():
+@pytest.mark.parametrize("threaded", [False, True])
+def test_process_context_error(threaded):
     '''Test which error takes precidence when both an error in the main thread
     and an error in the remote thread are raised.
 
@@ -23,24 +25,26 @@ def test_process_context_error():
     But this is just to give a definitive/predictable answer to which one it is.
     '''
     with pytest.raises(KeyError):
-        with remoteobj.util.process(_error):
+        with remoteobj.util.job(_error, threaded_=threaded):
             raise IndexError('error')
 
 
-def test_process_bad_func():
+@pytest.mark.parametrize("threaded", [False, True])
+def test_process_bad_func(threaded):
     '''Test how it reacts when a bad function is passed.
     '''
     with pytest.raises(TypeError):
-        with remoteobj.util.process(True):
+        with remoteobj.util.job(True, threaded_=threaded):
             pass
 
 
 def _return(x, y):
     return x + y
 
-def test_process_return():
+@pytest.mark.parametrize("threaded", [False, True])
+def test_process_return(threaded):
     '''Test that we get the process return value.'''
-    with remoteobj.util.process(_return, 5, 6) as p:
+    with remoteobj.util.job(_return, 5, 6, threaded_=threaded) as p:
         pass
     assert p.result == 11
 
@@ -53,11 +57,39 @@ def _yield2(x, y):
 
 
 @pytest.mark.parametrize("func", [_yield, _yield2])
-def test_process_yield(func):
+@pytest.mark.parametrize("threaded", [False, True])
+def test_process_yield(func, threaded):
     '''Test that we get the expected yield values from both a generator function
     and a normal function that returns an iterator.'''
-    with remoteobj.util.process(func, 5, 10) as p:
+    with remoteobj.util.job(func, 5, 10, threaded_=threaded) as p:
         pass
     with pytest.raises(TypeError):
         _ = p.result[0]
     assert list(p.result) == list(range(5, 10))
+
+
+def some_function():
+    return
+
+@pytest.mark.parametrize("threaded", [False, True])
+def test_process_name(threaded):
+    '''Make sure the process name is what we want'''
+    name = 'some_function-{}'.format('thread' if threaded else 'process')
+    with remoteobj.util.job(some_function, threaded_=threaded) as p:
+        first_part, i = p.name.rsplit('-', 1)
+        i = int(i)
+        assert first_part == name
+
+        # check that name increments
+        with remoteobj.util.job(some_function, threaded_=threaded) as p:
+            assert p.name == '{}-{}'.format(name, i+1)
+
+        with remoteobj.util.job(some_function, threaded_=threaded) as p:
+            assert p.name == '{}-{}'.format(name, i+2)
+
+        # test that mp and thread name increments are independent
+        with remoteobj.util.job(some_function, threaded_=not threaded) as p:
+            pass
+
+        with remoteobj.util.job(some_function, threaded_=threaded) as p:
+            assert p.name == '{}-{}'.format(name, i+3)

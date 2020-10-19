@@ -1,13 +1,51 @@
 import time
 import functools
 from contextlib import contextmanager
+import threading
 import multiprocessing as mp
 import remoteobj
 
 
 
+class _BackgroundMixin:
+    _EXC_CLASS = remoteobj.Except
+    def __init__(self, func, *a, results_=True, timeout_=None, raises_=True,
+                 name_=None, group_=None, daemon_=True, **kw):
+        self.exc = self._EXC_CLASS()
+        self.join_timeout = timeout_
+        self.join_raises = raises_
 
-class process(mp.Process):
+        super().__init__(
+            target=self.exc.wrap(func, result=results_),
+            args=a, kwargs=kw, name=name_,
+            group=group_, daemon=daemon_)
+
+
+    def start(self):
+        super().start()
+        return self
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        self.join()
+
+    def join(self, timeout=None, raises=None):
+        super().join(self.join_timeout if timeout is None else timeout)
+        if (self.join_raises if raises is None else raises):
+            self.exc.raise_any()
+
+    def raise_any(self):
+        self.exc.raise_any()
+
+    @property
+    def result(self):
+        return self.exc.get_result()
+
+
+class process(_BackgroundMixin, mp.Process):
     '''multiprocessing.Process, but easier and more Pythonic.
 
     What this provides:
@@ -32,46 +70,30 @@ class process(mp.Process):
             when the main process exits. Default True.
         **kwargs: the keyword args to pass to `func`
     '''
-    def __init__(self, func, *a, results_=True, timeout_=None, raises_=True,
-                 name_=None, group_=None, daemon_=True, **kw):
-        self.exc = remoteobj.Except()
-
-        super().__init__(
-            target=self.exc.wrap(func, result=results_),
-            args=a, kwargs=kw, name=name_,
-            group=group_, daemon=daemon_)
-
+    def __init__(self, func, *a, name_=None, **kw):
+        super().__init__(func, *a, name_=name_, **kw)
         # set a default name - _identity is set in __init__ so we have to
         # run it after
         if not name_:
-            self._name = '{}-{}'.format(
+            self._name = '-'.join([
                 getattr(func, '__name__', None) or self.__class__.__name__,
-                ':'.join(str(i) for i in self._identity))
-
-        self.join_timeout = timeout_
-        self.join_raises = raises_
-
-    def start(self):
-        super().start()
-        return self
-
-    def __enter__(self):
-        self.start()
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_tb):
-        self.join()
-
-    def join(self, timeout=None, raises=None):
-        super().join(self.join_timeout if timeout is None else timeout)
-        if (self.join_raises if raises is None else raises):
-            self.exc.raise_any()
-
-    @property
-    def result(self):
-        return self.exc.get_result()
+                'process', ':'.join(str(i) for i in self._identity)])
 
 
+
+class thread(_BackgroundMixin, threading.Thread):
+    _EXC_CLASS = remoteobj.LocalExcept
+    def __init__(self, func, *a, name_=None, **kw):
+        super().__init__(func, *a, name_=name_, **kw)
+        # set a default name
+        if not name_:
+            self._name = '-'.join([
+                getattr(func, '__name__', None) or self.__class__.__name__,
+                'thread', ':'.join(str(i) for i in self._name.split('-')[1:])])
+
+
+def job(*a, threaded_=True, **kw):
+    return (thread if threaded_ else process)(*a, **kw)
 
 # Helpers for tests and what not
 

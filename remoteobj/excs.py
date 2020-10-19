@@ -47,7 +47,7 @@ class LocalExcept:
             will ignore that exception. If False, every context up the chain
             will record the exception.
     '''
-    _first = _last = None
+    first = last = None
     _result = None
     _is_yield = _is_yielding = False
     def __init__(self, *types, raises=True, catch_once=True):
@@ -106,14 +106,16 @@ class LocalExcept:
         if name not in self._groups:
             self._groups[name] = []
         self._groups[name].append(exc)
-        if self._first is None:
-            self._first = exc
-        self._last = exc
+        if self.first is None:
+            self.first = exc
+        self.last = exc
         if mark:
             exc.__remoteobj_caught__ = name
 
     def get(self, name=None, latest=True):
         '''Get the last exception in the specified group, `name`.'''
+        if name == ...:
+            return self.last
         excs = self.group(name)
         return excs[-1 if latest else 0] if excs else None
 
@@ -126,7 +128,7 @@ class LocalExcept:
         raise any exception. If `name` is provided, only exceptions from
         that group will be raised.
         '''
-        exc = self.get(name) if name != ... else self._last
+        exc = self.get(name)
         if exc is not None:
             raise exc
 
@@ -137,7 +139,7 @@ class LocalExcept:
     def clear(self):
         '''Clear all exceptions and groups collected so far.'''
         self._groups.clear()
-        self._first = self._last = None
+        self.first = self.last = None
         self._result = None
         self._is_yield = self._is_yielding = False
 
@@ -184,8 +186,9 @@ class LocalExcept:
 class Except(LocalExcept):
     '''Catch exceptions in a remote process with their traceback and send them
     back to be raised properly in the main process.'''
-    def __init__(self, *types, **kw):
+    def __init__(self, *types, store_remote=True, **kw):
         self._local, self._remote = mp.Pipe()
+        self._store_remote = store_remote
         super().__init__(*types, **kw)
 
     def __str__(self):
@@ -208,7 +211,10 @@ class Except(LocalExcept):
         self._remote.send((
             RemoteException(exc) if isinstance(exc, BaseException) else exc, name))
         # set exceptions on this side just in case
-        super().set(exc, name, mark=mark)
+        if self._store_remote:
+            super().set(exc, name, mark=mark)
+        elif mark:
+            exc.__remoteobj_caught__ = name
 
     def pull(self):
         '''Pull any exceptions through the pipe. Used internally.'''

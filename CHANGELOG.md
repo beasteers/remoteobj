@@ -1,3 +1,11 @@
+# 0.2.5
+ - added `util.process/thread.raise_any()`
+ - rename `util.job(threaded=True)` => `util.job(threaded_=True)`
+
+# 0.2.4
+ - added `util.thread` for a threaded equivalent to `util.process`
+ - added `util.job(threaded=True)` / `util.job(threaded=False)` for a parameterized interface for thread / process respectively.
+
 # 0.2.3
  - added super simple examples for each at the top of the README to illustrate
  - fixed unpickleable bug TODO add test
