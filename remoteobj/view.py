@@ -22,9 +22,10 @@ class View:
 
     '''
     _keys, _frozen = (), False
-    def __init__(self, *keys, frozen=False):
+    def __init__(self, *keys, frozen=False, **kw):
         self._keys = keys
         self._frozen = frozen
+        super().__init__(**kw)
 
     def __str__(self):
         '''Return a string representation of the Op.'''

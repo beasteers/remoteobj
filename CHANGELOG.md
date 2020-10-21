@@ -1,6 +1,9 @@
 # 0.2.5
  - added `util.process/thread.raise_any()`
  - rename `util.job(threaded=True)` => `util.job(threaded_=True)`
+ - refactored BaseListener out of Proxy
+ - fixed bad call default argument
+ - default value can be a callable that will be evaluated lazily
 
 # 0.2.4
  - added `util.thread` for a threaded equivalent to `util.process`
