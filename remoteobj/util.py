@@ -34,6 +34,7 @@ class _BackgroundMixin:
 
     def join(self, timeout=None, raises=None):
         super().join(self.join_timeout if timeout is None else timeout)
+        self.exc.pull()
         if (self.join_raises if raises is None else raises):
             self.exc.raise_any()
 

@@ -1,3 +1,6 @@
+# 0.2.6a1
+ - fix Except pipe hang
+
 # 0.2.5
  - added `util.process/thread.raise_any()`
  - rename `util.job(threaded=True)` => `util.job(threaded_=True)`

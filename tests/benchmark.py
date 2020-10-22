@@ -97,8 +97,8 @@ def run_test(obj, calls, n=100):
 
 
 objs = [
-    # Obj(simple.PipeProxy),
-    # Obj(simple.QueueProxy),
+    Obj(simple.PipeProxy),
+    Obj(simple.QueueProxy),
     Obj(simple.SimpleQueueProxy),
     # Obj(simple.ManagerQueueProxy),
     # Obj(simple.DictQueueProxy),

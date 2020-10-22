@@ -3,6 +3,9 @@ import collections
 import functools
 import traceback
 import multiprocessing as mp
+import logging
+
+log = logging.getLogger(__name__)
 
 __all__ = ['Except', 'LocalExcept', 'RemoteException']
 
@@ -31,7 +34,8 @@ def _rebuild_exc(exc, tb):
     return exc
 
 
-
+RETURN, YIELD, YIELDRETURN = '__return__', '__yield__', '__yield_return__'
+RESULT_KEYS = RETURN, YIELD, YIELDRETURN
 
 
 class LocalExcept:
@@ -51,15 +55,17 @@ class LocalExcept:
     _result = None
     _is_yield = _is_yielding = False
     def __init__(self, *types, raises=True, catch_once=True):
-        self._local, self._remote = mp.Pipe()
         self.types = types or (Exception,)
         self.raises = raises
         self.catch_once = catch_once
         self._groups = {}
 
     def __str__(self):
-        return '<{} raises={} types={}{}>'.format(
+        return '<{} raises={} types={} {}{}>'.format(
             self.__class__.__name__, self.raises, self.types,
+            'result=None' if self._result is None else
+            'yield' if self._is_yield else
+            'result type={}'.format(type(self._result)),
             ''.join(
                 '\n {:>15} [{} raised]{}'.format(
                     '*default*' if name is None else name, len(excs),
@@ -86,19 +92,23 @@ class LocalExcept:
     def __getitem__(self, key):
         return self.group(key)
 
+    def __nonzero__(self):
+        return len(self.all())
+
     def set(self, exc, name=None, mark=True):
         '''Assign an exception to a group. Also handles the special cases
         of return and yield values.'''
-        if name == '__return__':
+        if name == RETURN:
             self._result = exc
             return
-        if name == '__yield__':
+        if name == YIELD:
             if self._result is None:
                 self._result = collections.deque()
                 self._is_yield = self._is_yielding = True
             self._result.append(exc)
             return
-        if name == '__yield_stop__':
+        if name == YIELDRETURN:
+            self._is_yield = True
             self._is_yielding = False
             return
 
@@ -110,7 +120,10 @@ class LocalExcept:
             self.first = exc
         self.last = exc
         if mark:
-            exc.__remoteobj_caught__ = name
+            self._mark(exc, name)
+
+    def _mark(self, exc, name=None):
+        exc.__remoteobj_caught__ = name
 
     def get(self, name=None, latest=True):
         '''Get the last exception in the specified group, `name`.'''
@@ -143,6 +156,9 @@ class LocalExcept:
         self._result = None
         self._is_yield = self._is_yielding = False
 
+    def pull(self):
+        pass  # noop
+
     def wrap(self, func, result=True):
         '''Wrap a function to catch any exceptions raised. To re-raise the
         exception, run self.raise_any(). By default, it will also capture the
@@ -162,11 +178,11 @@ class LocalExcept:
         if hasattr(x,'__iter__') and not hasattr(x,'__len__'):
             try:
                 for xi in x:
-                    self.set(xi, '__yield__')
+                    self.set(xi, YIELD)
             finally:
-                self.set(None, '__yield_stop__')
+                self.set(None, YIELDRETURN)
         else:
-            self.set(x, '__return__')
+            self.set(x, RETURN)
 
     def get_result(self, delay=1e-6):
         '''Retrieve a function's result.'''
@@ -188,7 +204,9 @@ class Except(LocalExcept):
     back to be raised properly in the main process.'''
     def __init__(self, *types, store_remote=True, **kw):
         self._local, self._remote = mp.Pipe()
+        # self._q = mp.Queue()
         self._store_remote = store_remote
+        # self._local_name = mp.current_process().name
         super().__init__(*types, **kw)
 
     def __str__(self):
@@ -207,20 +225,30 @@ class Except(LocalExcept):
         self.pull()
         return super().all()
 
-    def set(self, exc, name=None, mark=True):
-        self._remote.send((
-            RemoteException(exc) if isinstance(exc, BaseException) else exc, name))
+    def set(self, exc, name=None, mark=True): #, store=None
+        r_exc = RemoteException(exc) if isinstance(exc, BaseException) else exc
+        # self._q.put((r_exc, name))
+        self._remote.send((r_exc, name))
         # set exceptions on this side just in case
         if self._store_remote:
             super().set(exc, name, mark=mark)
-        elif mark:
-            exc.__remoteobj_caught__ = name
+        elif mark and name not in RESULT_KEYS:
+            self._mark(exc, name)
+
+    def get_result(self, **kw):
+        self.pull()
+        return super().get_result(**kw)
 
     def pull(self):
         '''Pull any exceptions through the pipe. Used internally.'''
-        while self._local.poll():
-            exc, name = self._local.recv()
-            super().set(exc, name)
+        try:
+            while self._local.poll():
+            # while not self._q.empty():
+            #     exc, name = self._q.get()
+                exc, name = self._local.recv()
+                super().set(exc, name)
+        except (EOFError, FileNotFoundError, ConnectionRefusedError) as e:
+            log.exception(e)
 
     def raise_any(self, name=...):
         self.pull()

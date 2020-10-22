@@ -1,3 +1,4 @@
+import time
 import pytest
 import remoteobj
 
@@ -46,6 +47,16 @@ def test_process_return(threaded):
     '''Test that we get the process return value.'''
     with remoteobj.util.job(_return, 5, 6, threaded_=threaded) as p:
         pass
+    print(p.exc)
+    assert p.result == 11
+
+@pytest.mark.parametrize("threaded", [False, True])
+def test_process_return(threaded):
+    '''Test that we get the process return value.'''
+    with remoteobj.util.job(_return, 5, 6, threaded_=threaded) as p:
+        pass
+    time.sleep(0.5)
+    print(p.exc)
     assert p.result == 11
 
 def _yield(x, y):
