@@ -38,6 +38,17 @@ RETURN, YIELD, YIELDRETURN = '__return__', '__yield__', '__yield_return__'
 RESULT_KEYS = RETURN, YIELD, YIELDRETURN
 
 
+# class PipeQueue(mp.Pipe):
+#     def empty(self):
+#         return not self.poll()
+#
+#     def put(self, X):
+#         return self.send(X)
+#
+#     def get(self, X):
+#         return self.recv(X)
+
+
 class LocalExcept:
     '''Catch exceptions and store them in groups.
 
@@ -54,10 +65,11 @@ class LocalExcept:
     first = last = None
     _result = None
     _is_yield = _is_yielding = False
-    def __init__(self, *types, raises=True, catch_once=True):
+    def __init__(self, *types, raises=True, catch_once=True, log=False, log_tb=False):
         self.types = types or (Exception,)
         self.raises = raises
         self.catch_once = catch_once
+        self.log, self.log_tb = log, log_tb
         self._groups = {}
 
     def __str__(self):
@@ -95,6 +107,9 @@ class LocalExcept:
     def __nonzero__(self):
         return len(self.all())
 
+    def __iter__(self):
+        return iter(self.all())
+
     def set(self, exc, name=None, mark=True):
         '''Assign an exception to a group. Also handles the special cases
         of return and yield values.'''
@@ -113,6 +128,8 @@ class LocalExcept:
             return
 
         # handle exceptions and grouping
+        if getattr(exc, '__remoteobj_caught__', name) != name:
+            return
         if name not in self._groups:
             self._groups[name] = []
         self._groups[name].append(exc)
@@ -136,14 +153,22 @@ class LocalExcept:
         '''Get all exceptions in a group, `name`.'''
         return self._groups.get(name) or []
 
-    def raise_any(self, name=...):
+    def raise_any(self, name=..., latest=True):
         '''Raise any exceptions that were collected. By default it will
         raise any exception. If `name` is provided, only exceptions from
         that group will be raised.
         '''
-        exc = self.get(name)
+        exc = self.get(name, latest=latest)
         if exc is not None:
             raise exc
+
+    def log_tracebacks(self, name=..., logger=log, all=True, latest=True):
+        for e in self.all() if all else [self.get(name, latest=latest)]:
+            logger.exception(e)
+
+    def log_error(self, name=..., logger=log, all=True, latest=True):
+        for e in self.all() if all else [self.get(name, latest=latest)]:
+            logger.error('(%s) %s', e.__class__.__name__, e)
 
     def all(self):
         '''Get all exceptions (from all groups) as a list.'''
@@ -197,6 +222,13 @@ class LocalExcept:
             return results()
         return self._result
 
+    def clear_result(self):
+        self._result = collections.deque() if self._is_yield else None
+
+    def pop_result(self):
+        result = self.get_result()
+        self.clear_result()
+        return result
 
 
 class Except(LocalExcept):
@@ -213,9 +245,9 @@ class Except(LocalExcept):
         self.pull()
         return super().__str__()
 
-    def get(self, name=None):
+    def get(self, name=None, *a, **kw):
         self.pull()
-        return super().get(name)
+        return super().get(name, *a, **kw)
 
     def group(self, name=None):
         self.pull()
@@ -253,6 +285,14 @@ class Except(LocalExcept):
     def raise_any(self, name=...):
         self.pull()
         return super().raise_any(name)
+
+    def log_tracebacks(self, name=..., *a, **kw):
+        self.pull()
+        return super().log_tracebacks(name, *a, **kw)
+
+    def log_error(self, name=..., *a, **kw):
+        self.pull()
+        return super().log_error(name, *a, **kw)
 
 
 class _ExceptContext:

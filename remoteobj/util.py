@@ -1,4 +1,5 @@
 import time
+import ctypes
 import functools
 from contextlib import contextmanager
 import threading
@@ -10,8 +11,8 @@ import remoteobj
 class _BackgroundMixin:
     _EXC_CLASS = remoteobj.Except
     def __init__(self, func, *a, results_=True, timeout_=None, raises_=True,
-                 name_=None, group_=None, daemon_=True, **kw):
-        self.exc = self._EXC_CLASS()
+                 name_=None, group_=None, daemon_=True, exc_=None, **kw):
+        self.exc = self._EXC_CLASS() if exc_ is None else exc_
         self.join_timeout = timeout_
         self.join_raises = raises_
 
@@ -19,6 +20,15 @@ class _BackgroundMixin:
             target=self.exc.wrap(func, result=results_),
             args=a, kwargs=kw, name=name_,
             group=group_, daemon=daemon_)
+
+        # set a default name - _identity is set in __init__ so we have to
+        # run it after
+        if not name_:
+            self._name = '-'.join((s for s in (
+                getattr(func, '__name__', None),
+                self.__class__.__name__,
+                ':'.join(str(i) for i in self._identity)
+            ) if s))
 
 
     def start(self):
@@ -71,26 +81,19 @@ class process(_BackgroundMixin, mp.Process):
             when the main process exits. Default True.
         **kwargs: the keyword args to pass to `func`
     '''
-    def __init__(self, func, *a, name_=None, **kw):
-        super().__init__(func, *a, name_=name_, **kw)
-        # set a default name - _identity is set in __init__ so we have to
-        # run it after
-        if not name_:
-            self._name = '-'.join([
-                getattr(func, '__name__', None) or self.__class__.__name__,
-                'process', ':'.join(str(i) for i in self._identity)])
-
+    _EXC_CLASS = remoteobj.Except
 
 
 class thread(_BackgroundMixin, threading.Thread):
     _EXC_CLASS = remoteobj.LocalExcept
-    def __init__(self, func, *a, name_=None, **kw):
-        super().__init__(func, *a, name_=name_, **kw)
-        # set a default name
-        if not name_:
-            self._name = '-'.join([
-                getattr(func, '__name__', None) or self.__class__.__name__,
-                'thread', ':'.join(str(i) for i in self._name.split('-')[1:])])
+
+    @property
+    def _identity(self):
+        return self._name.split('-')[1:]
+
+    def throw(self, exc):
+        raise_thread(exc, self)
+
 
 
 def job(*a, threaded_=True, **kw):
@@ -140,3 +143,32 @@ def _run_remote_bg(obj, event, callback=None, delay=1e-5):  # some remote job
         while not event.is_set() and obj.remote.listening_:
             callback and callback(obj)
             time.sleep(delay)
+
+
+def raise_thread(exc, name='MainThread'):
+    '''Raise an exception on another thread.
+
+    https://gist.github.com/liuw/2407154
+    # ref: http://docs.python.org/c-api/init.html#PyThreadState_SetAsyncExc
+
+    Apparently this doesn't work in some cases:
+    | if the thread to kill is blocked at some I/O or sleep(very_long_time)
+    Maybe we can retry it or something?
+    '''
+    tid = ctypes.c_long(find_thread(name, require=True).ident)
+    ret = ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, ctypes.py_object(exc))
+    if ret == 0:
+        raise ValueError("Invalid thread ID")
+    if ret > 1:  # Huh? we punch a hole into C level interpreter, so clean up the mess.
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, 0)  # null
+        raise SystemError("Raising in remote thread failed.")
+
+
+def find_thread(name, require=False):
+    if isinstance(name, threading.Thread):
+        return name
+    try:
+        return next((t for t in threading.enumerate() if t.name == name), None)
+    except StopIteration:
+        if require:
+            raise ValueError("Couldn't find thread matching: {}".format(name)) from None

@@ -99,7 +99,7 @@ class BaseListener:
 
     # parent calling interface
 
-    def _evaluate(self, request, default=UNDEFINED):
+    def _evaluate(self, request, default=UNDEFINED, default_local=False):
         '''Request the remote object to evaluate the proxy and return the value.
         If you are in the same process as the remote object, it will evaluate
         directly.
@@ -117,6 +117,8 @@ class BaseListener:
                 if x is not None:
                     return self._parse_response(x)
 
+        if default_local:
+            return self._process(request)
         return self._handle_no_listener(default=default)
 
     @property

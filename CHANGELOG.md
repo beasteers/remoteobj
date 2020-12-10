@@ -1,3 +1,19 @@
+## Feature Proposals
+ - equivalent `util.process().throw()` like what we have for threads
+ - `util.raise_thread` doesn't work with I/O e.g. `time.sleep(long_time)`
+ - sorting exceptions by emit order (while still storing by group?)
+ - fix reserved parameter consistency because it can be confusing
+
+# 0.2.7
+ - add `LocalExcept.log_tracebacks()` which calls `log.exception` for all exceptions
+ - add `exc.logline()` which does `log.error(f'({e.__class__.__name__}) {e}')`
+ - add `util.raise_thread()` which raises an exception in the thread
+    - similarly, added `util.thread().throw(ValueError)` as a convenience method
+ - add `Proxy().get_(default_local=True)` which will resolve the view locally if no remote instance is found.
+ - added `LocalExcept.__iter__` method to iterate over exceptions
+ - added `LocalExcept.clear_result()`
+ - added `LocalExcept.pop_result()` which gets the result and then clears it
+
 # 0.2.6a1
  - fix Except pipe hang
 

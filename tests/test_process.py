@@ -54,7 +54,7 @@ def test_process_return(threaded):
 def test_process_return(threaded):
     '''Test that we get the process return value.'''
     with remoteobj.util.job(_return, 5, 6, threaded_=threaded) as p:
-        pass
+        time.sleep(0.5)
     time.sleep(0.5)
     print(p.exc)
     assert p.result == 11
