@@ -51,7 +51,7 @@ def test_process_return(threaded):
     assert p.result == 11
 
 @pytest.mark.parametrize("threaded", [False, True])
-def test_process_return(threaded):
+def test_process_return_sleep(threaded):
     '''Test that we get the process return value.'''
     with remoteobj.util.job(_return, 5, 6, threaded_=threaded) as p:
         time.sleep(0.5)

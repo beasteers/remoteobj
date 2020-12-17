@@ -4,6 +4,10 @@
  - sorting exceptions by emit order (while still storing by group?)
  - fix reserved parameter consistency because it can be confusing
 
+# 0.2.8
+ - switched from mp.Pipe to mp.Queue - more reliable. sometimes with pipes the data (especially function return), wouldn't go thru
+ - can set per-context logger/tog_tb flag - e.g. `with exc(log=logger, log_tb=True):`
+
 # 0.2.7
  - add `LocalExcept.log_tracebacks()` which calls `log.exception` for all exceptions
  - add `exc.logline()` which does `log.error(f'({e.__class__.__name__}) {e}')`

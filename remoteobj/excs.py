@@ -5,7 +5,8 @@ import traceback
 import multiprocessing as mp
 import logging
 
-log = logging.getLogger(__name__)
+log_ = log = logging.getLogger(__name__)
+
 
 __all__ = ['Except', 'LocalExcept', 'RemoteException']
 
@@ -69,6 +70,8 @@ class LocalExcept:
         self.types = types or (Exception,)
         self.raises = raises
         self.catch_once = catch_once
+        if log is True:
+            log = log_
         self.log, self.log_tb = log, log_tb
         self._groups = {}
 
@@ -88,12 +91,14 @@ class LocalExcept:
             ) or ' - No exceptions raised.'
         )
 
-    def __call__(self, name=None, raises=None, types=None, catch_once=None):
+    def __call__(self, name=None, raises=None, types=None, catch_once=None, log=None, log_tb=None):
         return _ExceptContext(
             self, name,
             self.raises if raises is None else raises,
             self.types if types is None else types,
-            self.catch_once if catch_once is None else catch_once)
+            catch_once=self.catch_once if catch_once is None else catch_once,
+            log=self.log if log else None,
+            log_tb=self.log_tb if log_tb is None else log_tb)
 
     def __enter__(self):
         return self
@@ -231,15 +236,46 @@ class LocalExcept:
         return result
 
 
+# def blah(obj):
+#     look = {}
+#     def __init__(self, *a, **kw):
+#         look[id(self)] = self
+#         super().__init__(*a, **kw)
+#     def __getstate__(self):
+#         return dict(_id=id(self))
+#     def __setstate__(self, state):
+#         self.__dict__ = look[state['_id']].__dict__
+#
+#     obj.__class__ = type(obj.__class__.__name__, (obj.__class__,), {
+#         '__lookup': look, '__getstate__': __getstate__, '__setstate__': __setstate__
+#     })
+
 class Except(LocalExcept):
     '''Catch exceptions in a remote process with their traceback and send them
     back to be raised properly in the main process.'''
+    __Qs = {}
     def __init__(self, *types, store_remote=True, **kw):
-        self._local, self._remote = mp.Pipe()
-        # self._q = mp.Queue()
+        # self._local, self._remote = mp.Pipe()
+        self._q = mp.Queue()
+        self._q_id = id(self._q)
+        self.__Qs[self._q_id] = self._q
         self._store_remote = store_remote
         # self._local_name = mp.current_process().name
         super().__init__(*types, **kw)
+
+    ### these methods are to prevent queues from being pickled
+
+    def __getstate__(self):
+        return dict(self.__dict__, _q=None)
+
+    def __setstate__(self, state):
+        self.__dict__ = state
+        self._q = self.__Qs[self._q_id]
+
+    def __del__(self):
+        self.__Qs.pop(self._q_id, None)
+
+    #########
 
     def __str__(self):
         self.pull()
@@ -259,8 +295,8 @@ class Except(LocalExcept):
 
     def set(self, exc, name=None, mark=True): #, store=None
         r_exc = RemoteException(exc) if isinstance(exc, BaseException) else exc
-        # self._q.put((r_exc, name))
-        self._remote.send((r_exc, name))
+        self._q.put((r_exc, name))
+        # self._remote.send((r_exc, name))
         # set exceptions on this side just in case
         if self._store_remote:
             super().set(exc, name, mark=mark)
@@ -274,11 +310,12 @@ class Except(LocalExcept):
     def pull(self):
         '''Pull any exceptions through the pipe. Used internally.'''
         try:
-            while self._local.poll():
-            # while not self._q.empty():
-            #     exc, name = self._q.get()
-                exc, name = self._local.recv()
-                super().set(exc, name)
+            while not self._q.empty():
+                x = self._q.get(block=False)
+            # while self._local.poll():
+                # exc, name = self._local.recv()
+                if x:
+                    super().set(*x)
         except (EOFError, FileNotFoundError, ConnectionRefusedError) as e:
             log.exception(e)
 
@@ -296,12 +333,14 @@ class Except(LocalExcept):
 
 
 class _ExceptContext:
-    def __init__(self, catch, name=None, raises=False, types=(), catch_once=True):
+    def __init__(self, catch, name=None, raises=False, types=(), catch_once=True, log=False, log_tb=False):
         self.catch = catch
         self.name = name
         self.raises = raises or not catch_once
         self.types = types
         self.catch_once = catch_once
+        self.log = log
+        self.log_tb = log_tb
 
     def __enter__(self):
         return self
@@ -309,4 +348,9 @@ class _ExceptContext:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_val is not None and isinstance(exc_val, self.types):
             self.catch.set(exc_val, self.name, self.catch_once)
+            if self.log:
+                if self.log_tb:
+                    self.log.exception(exc_val)
+                else:
+                    self.log.error('({}) {}'.format(exc_type, exc_val))
             return not self.raises
