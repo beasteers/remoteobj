@@ -4,6 +4,12 @@
  - sorting exceptions by emit order (while still storing by group?)
  - fix reserved parameter consistency because it can be confusing
 
+# 0.3.1
+ - fix another race condition when closing a remote listener (wasn't preventing requesting processes from acquiring the lock if the process is no longer listening) god this is exhausting
+
+# 0.3.0
+ - fix race condition when closing a remote listener (wasn't checking if a requesting process had locked, but not sent yet)
+
 # 0.2.9
  - add `close_` argument which takes a function that will be called before joining. Useful for passing a function that sets a flag.
 

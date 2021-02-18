@@ -71,15 +71,21 @@ class BaseListener:
 
     def process_requests(self):
         '''Poll until the command queue is empty.'''
+        n = 0
         while self._remote.poll():
             self.poll()
             time.sleep(self._delay)
+            n += 1
+        return n
 
     def cancel_requests(self):
+        n = 0
         while self._remote.poll():
             _ = self._remote.recv()
             self._remote.send(None)
             time.sleep(self._delay)
+            n += 1
+        return n
 
     def poll(self, wait=False):
         '''Check for and execute the next command in the queue, if available.'''
@@ -102,6 +108,8 @@ class BaseListener:
                             'Return value of {} is unpickleable.'.format(request)) from e
                     warnings.warn(UNPICKLEABLE_WARNING.format(view=request, result=result))
                     self._remote.send((None, None))
+            return True
+        return False
 
     # parent calling interface
 
@@ -115,13 +123,14 @@ class BaseListener:
         '''
         if self._local_listener:  # if you're in the remote process, just run the function.
             return self._process(request)
-        with self._llock:
-            if self.listening_:  # if the remote process is listening, run
-                # send and wait for a result
-                self._local.send(request)
-                x = self._local.recv()
-                if x is not None:
-                    return self._parse_response(x)
+        if self.listening_:  # there's no way to disable a lock, so we need to check twice in order to avoid race conditions on closing
+            with self._llock:
+                if self.listening_:  # if the remote process is listening, run
+                    # send and wait for a result
+                    self._local.send(request)
+                    x = self._local.recv()
+                    if x is not None:
+                        return self._parse_response(x)
 
         if default_local:
             return self._process(request)
