@@ -5,7 +5,7 @@ NAME = 'remoteobj'
 
 setuptools.setup(
     name=NAME,
-    version='0.2.8',
+    version='0.3.0',
     description='Facilitating cross-process programming.',
     long_description=open('README.md').read().strip(),
     long_description_content_type='text/markdown',

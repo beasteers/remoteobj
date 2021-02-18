@@ -75,7 +75,13 @@ class BaseListener:
             self.poll()
             time.sleep(self._delay)
 
-    def poll(self):
+    def cancel_requests(self):
+        while self._remote.poll():
+            _ = self._remote.recv()
+            self._remote.send(None)
+            time.sleep(self._delay)
+
+    def poll(self, wait=False):
         '''Check for and execute the next command in the queue, if available.'''
         if self._remote.poll():
             with self._rlock:
@@ -140,12 +146,12 @@ class BaseListener:
         self._listener_process_name = mp.current_process().name if value else None
         # make sure no one is left waiting.
         if prev and not value:
-            if self._fulfill_final:
-                self.process_requests()
-            else:
-                while self._remote.poll():
-                    _ = self._remote.recv()
-                    self._remote.send(None)  # cancel
+            # there's a slight race condition between checking if we're still listening and sending the request
+            while is_locked(self._llock):
+                if self._fulfill_final:
+                    self.process_requests()
+                else:
+                    self.cancel_requests()
 
     # remote background listening interface
     '''
@@ -225,3 +231,10 @@ class BaseListener:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop_listen_()
+
+
+def is_locked(lock):
+    locked = lock.acquire(block=False)
+    if locked:
+        lock.release()
+    return not locked

@@ -11,10 +11,11 @@ import remoteobj
 class _BackgroundMixin:
     _EXC_CLASS = remoteobj.Except
     def __init__(self, func, *a, results_=True, timeout_=None, raises_=True,
-                 name_=None, group_=None, daemon_=True, exc_=None, **kw):
+                 name_=None, group_=None, daemon_=True, exc_=None, close_=None, **kw):
         self.exc = self._EXC_CLASS() if exc_ is None else exc_
         self.join_timeout = timeout_
         self.join_raises = raises_
+        self._closer = close_
 
         super().__init__(
             target=self.exc.wrap(func, result=results_),
@@ -43,6 +44,8 @@ class _BackgroundMixin:
         self.join()
 
     def join(self, timeout=None, raises=None):
+        if callable(self._closer):
+            self._closer()
         super().join(self.join_timeout if timeout is None else timeout)
         self.exc.pull()
         if (self.join_raises if raises is None else raises):
