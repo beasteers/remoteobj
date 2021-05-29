@@ -1,4 +1,6 @@
 import time
+import ctypes
+# import signal
 import warnings
 import multiprocessing as mp
 from .excs import RemoteException
@@ -27,16 +29,24 @@ UNPICKLEABLE_WARNING = (
 class BaseListener:
     _thread = None
     _delay = 1e-5
-    _listener_process_name = None
-    _NOCOPY = ['_local', '_remote', '_llock', '_rlock', '_listening_val']
+    _listener_proc = None
+    # _listener_process_name = None
+    _NOCOPY = ['_local', '_remote', '_llock', '_rlock', '_listener_ident']  # , '_listening_val'
     def __init__(self, fulfill_final=True, default=UNDEFINED, __new=True, **kw):
         # cross-process objects
-        self._listening_val = mp.Value('i', 0, lock=False)
+        # self._listening_val = mp.Value('i', 0, lock=False)
+        self._listener_ident = mp.Value('i', 0, lock=False)
         self._llock, self._rlock = mp.Lock(), mp.Lock()
         self._local, self._remote = mp.Pipe()
         self._root = self  # isn't called when extending
         self._fulfill_final = fulfill_final
         self._default = default
+
+        # orig_handler = signal.getsignal(signal.SIGSEGV)
+        # def sig_handler(signum, frame):
+        #     self._listener_ident.value = 0
+        #     orig_handler(signum, frame)
+        # signal.signal(signal.SIGSEGV, sig_handler)
         super().__init__(**kw)
 
     def __getstate__(self):
@@ -139,28 +149,49 @@ class BaseListener:
     @property
     def _local_listener(self):
         '''Is the current process the main process or a child one?'''
-        return mp.current_process().name == self._listener_process_name
+        p = mp.current_process()
+        try:  # XXX: should I be worried about this changing?
+            current_ident = getattr(p, '_cached_ident')
+        except AttributeError:
+            current_ident = p._cached_ident = p.ident
+        return current_ident == self._listener_ident.value
 
     # running state - to avoid dead locks, let the other process know if you will respond
     @property
     def listening_(self):
         '''Is the remote instance listening?'''
-        return bool(self._listening_val.value)
+        ident = self._listener_ident.value
+        return ident > 0
+        # if ident <= 0:
+        #     return False
+        # if self._listener_proc is None:
+        #     # util.mprint(type(ident), [type(p.ident) for p in mp.active_children()])
+        #     try:
+        #         self._listener_proc = next((p for p in mp.active_children() if p.ident == ident))
+        #     except StopIteration:
+        #         pass
+        # return bool(self._listener_proc is not None and self._listener_proc.is_alive())
+        # # return bool(self._listening_val.value)
 
     @listening_.setter
     def listening_(self, value):
         # set first so no one else can
-        prev = self.listening_
-        self._listening_val.value = int(value)
-        self._listener_process_name = mp.current_process().name if value else None
-        # make sure no one is left waiting.
-        if prev and not value:
-            # there's a slight race condition between checking if we're still listening and sending the request
-            while is_locked(self._llock):
-                if self._fulfill_final:
-                    self.process_requests()
-                else:
-                    self.cancel_requests()
+        prev = self._listener_ident.value > 0
+        if value:
+            self._listener_proc = p = mp.current_process()
+            self._listener_ident.value = p.ident
+        else:
+            self._listener_proc = None
+            self._listener_ident.value = 0
+
+            # make sure no one is left waiting.
+            if prev:
+                # there's a slight race condition between checking if we're still listening and sending the request
+                while is_locked(self._llock):
+                    if self._fulfill_final:
+                        self.process_requests()
+                    else:
+                        self.cancel_requests()
 
     # remote background listening interface
     '''
@@ -212,7 +243,7 @@ class BaseListener:
         finally:
             self.listening_ = False
 
-    def wait_until_listening(self, proc=None, fail=True):
+    def wait_until_listening(self, proc=None, fail=True, timeout=None):
         '''Wait until the remote instance is listening.
 
         Args:
@@ -226,12 +257,15 @@ class BaseListener:
         Raises:
             `RuntimeError if fail == True and not proc.is_alive()`
         '''
+        t0 = time.time()
         while not self.listening_:
             if proc is not None and not proc.is_alive():
                 if fail:
                     raise RuntimeError('Process is dead and the proxy never started listening.')
                 return False
             time.sleep(self._delay)
+            if timeout and time.time() - t0 >= timeout:
+                raise TimeoutError('Remote listener never started listening.')
         return True
 
     def __enter__(self):

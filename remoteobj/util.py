@@ -10,15 +10,18 @@ import remoteobj
 
 class _BackgroundMixin:
     _EXC_CLASS = remoteobj.Except
+    _wait_for_return = False
     def __init__(self, func, *a, results_=True, timeout_=None, raises_=True,
                  name_=None, group_=None, daemon_=True, exc_=None, close_=None, **kw):
         self.exc = self._EXC_CLASS() if exc_ is None else exc_
         self.join_timeout = timeout_
         self.join_raises = raises_
         self._closer = close_
+        if self._wait_for_return is not False:
+            self._wait_for_return = mp.Event()
 
         super().__init__(
-            target=self.exc.wrap(func, result=results_),
+            target=self._wrap(func, result=results_),
             args=a, kwargs=kw, name=name_,
             group=group_, daemon=daemon_)
 
@@ -43,11 +46,32 @@ class _BackgroundMixin:
     def __exit__(self, exc_type, exc_value, exc_tb):
         self.join()
 
+    _wait_timeout_interval = 0.1
+    _min_partial_timeout = 0.3
     def join(self, timeout=None, raises=None):
+        timeout = self.join_timeout if timeout is None else timeout
+
+        # this lets someone pass a function that will, say, do self.closing.set()
         if callable(self._closer):
             self._closer()
-        super().join(self.join_timeout if timeout is None else timeout)
+        
+        # for multiprocessing there is a scenario where we could experience a deadlock.
+        # Basically, OS Pipes are not infinitely big - so if a queue item is larger than 
+        # the Pipe limit, then there is a thread on the child process that will wait for 
+        # the main process to call get() so it can feed the (too large) object through.
+        # But if we call join without clearing the queue, then we'll just be forever waiting 
+        # for each other.
+        # So - this uses a multiprocessing event to 
+        t0 = time.time()
+        if self._wait_for_return:
+            while self.is_alive() and (not timeout or (time.time() - t0) < timeout) and not self._wait_for_return.is_set():
+                self._wait_for_return.wait(timeout=self._wait_timeout_interval)
+            timeout = max(self._min_partial_timeout, timeout - (time.time() - t0)) if timeout else None
+
         self.exc.pull()
+        super().join(timeout=timeout)
+        self.exc.pull()
+
         if (self.join_raises if raises is None else raises):
             self.exc.raise_any()
 
@@ -58,12 +82,24 @@ class _BackgroundMixin:
     def result(self):
         return self.exc.get_result()
 
+    def _wrap(self, func, *a, **kw):
+        wrapped = self.exc.wrap(func, *a, **kw)
+        @functools.wraps(func)
+        def wrapped_wait(*a, **kw):
+            try:
+                return wrapped(*a, **kw)
+            finally:
+                if self._wait_for_return:
+                    self._wait_for_return.set()
+        return wrapped_wait
+
+
 
 class process(_BackgroundMixin, mp.Process):
     '''multiprocessing.Process, but easier and more Pythonic.
 
     What this provides:
-     - has a cleaner signature - `process(func, *a, **kw)`
+     - has a cleaner signature - `process(func, *a, join_timeout_=True, **kw)`
      - can be used as a context manager `with process(...):`
      - pulls the process name from the function name by default
      - defaults to `daemon=True`
@@ -85,6 +121,7 @@ class process(_BackgroundMixin, mp.Process):
         **kwargs: the keyword args to pass to `func`
     '''
     _EXC_CLASS = remoteobj.Except
+    _wait_for_return = True
 
 
 class thread(_BackgroundMixin, threading.Thread):
@@ -104,9 +141,35 @@ def job(*a, threaded_=True, **kw):
 
 # Helpers for tests and what not
 
+def mprint(*a, end='\n', **kw):
+    '''A print statement that won't interleave with each other over multiprocessing.'''
+    print(' '.join(map(str, a)) + (end or ''), end='', **kw)
+
+
+def segfault(dumps=None):
+    '''Create a segfault. This can happen sometimes with multiprocessing so this let's us 
+    simulate it in a controlled environment and test out how we handle it.'''
+    # https://gist.github.com/coolreader18/6dbe0be2ae2192e90e1a809f1624c694
+    set_faulthandler(dumps)
+    class E(BaseException):
+        def __new__(cls, *a, **kw):
+            return cls
+    def a(): yield
+    a().throw(E)
+
+def set_faulthandler(dumps=None):  # TODO make context manager - but how to restore the previous enable() args?? (file&all_threads)
+    if dumps is not None:
+        import faulthandler
+        if dumps:
+            faulthandler.is_enabled() or faulthandler.enable()
+        else:
+            faulthandler.is_enabled() and faulthandler.disable()
+
+# wrappers
+
 
 @contextmanager
-def listener(obj, bg=None, wait=True, callback=None, **kw):
+def listener(obj, bg=None, wait=True, callback=None, wait_timeout=10, join_timeout=10, **kw):
     if bg is None:
         bg = callable(callback)
     func = (
@@ -114,10 +177,10 @@ def listener(obj, bg=None, wait=True, callback=None, **kw):
         _run_remote_bg if bg else
         _run_remote)
     event = mp.Event()
-    with process(func, obj, event, callback=callback, **kw) as p:
+    with process(func, obj, event, callback=callback, timeout_=join_timeout, **kw) as p:
         try:
             if wait:
-                obj.remote.wait_until_listening()
+                obj.remote.wait_until_listening(p, timeout=wait_timeout)
             yield p
         finally:
             event.set()

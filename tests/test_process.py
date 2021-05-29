@@ -2,10 +2,44 @@ import time
 import pytest
 import remoteobj
 
+# class KeyboardInterrupt2(BaseException): pass
 
+# @pytest.fixture(autouse=True)
+# def i_want_to_see_what_we_interrupt_damnit(tmpdir):
+#     """Fixture to execute asserts before and after a test is run"""
+#     try:
+#         yield 
+#     except KeyboardInterrupt as e:
+#         raise KeyboardInterrupt2(str(e)) from e
 
 def _error():
+    print('hi im in your traceback!')
     raise KeyError('errorrr')
+
+def _nested_err1():
+    _nested_err2()
+
+def _nested_err2():
+    _nested_err3()
+
+def _nested_err3():
+    _error()
+
+def test_process_traceback():
+    try:
+        import tblib
+        with remoteobj.util.process(_nested_err1, raises_=False) as p:
+            pass
+        print(p.exc.all())
+        try:
+            p.exc.raise_any()
+        except KeyError:
+            import traceback
+            tbstr = traceback.format_exc()
+            for name in ['_nested_err1', '_nested_err2', '_nested_err3', '_error']:
+                assert name in tbstr
+    except ImportError:
+        pass
 
 @pytest.mark.parametrize("threaded", [False, True])
 def test_process_error(threaded):
@@ -50,12 +84,54 @@ def test_process_return(threaded):
     print(p.exc)
     assert p.result == 11
 
+
+def _return_big(i=100, n=1000, nstr=20):
+    return [{i: str(i)*nstr for i in range(i)} for _ in range(n)]
+
 @pytest.mark.parametrize("threaded", [False, True])
-def test_process_return_sleep(threaded):
+def test_process_return_big(threaded):
+    '''Test that we get the process return value.'''
+    with remoteobj.util.job(_return_big, threaded_=threaded) as p:
+        pass
+    print(p.exc)
+    assert p.result == _return_big()
+
+
+
+def segfault_after(secs=0):
+    secs and time.sleep(secs)
+    remoteobj.util.segfault(dumps=False)
+
+
+def test_process_join_segfault():
+    '''Test that we get the process return value.'''
+    with remoteobj.util.process(segfault_after, 0.5) as p:
+        pass
+    assert p.result is None
+
+
+def delay_return(delay=0.1):
+    time.sleep(delay)
+    return 10
+
+def test_process_return_after():
+    '''Test that we get the process return value.'''
+    p = remoteobj.util.job(delay_return)
+    p.start()
+    while p.is_alive():
+        time.sleep(0.1)
+    time.sleep(2)
+    print(p.exc)
+    assert p.result == delay_return(0)
+
+
+@pytest.mark.parametrize("after_delay", [0.1, 0.5, 1])
+@pytest.mark.parametrize("threaded", [False, True])
+def test_process_return_sleep(after_delay, threaded):
     '''Test that we get the process return value.'''
     with remoteobj.util.job(_return, 5, 6, threaded_=threaded) as p:
         time.sleep(0.5)
-    time.sleep(0.5)
+    time.sleep(after_delay)
     print(p.exc)
     assert p.result == 11
 

@@ -3,6 +3,23 @@
  - `util.raise_thread` doesn't work with I/O e.g. `time.sleep(long_time)`
  - sorting exceptions by emit order (while still storing by group?)
  - fix reserved parameter consistency because it can be confusing
+ - Have proxy object be segfault safe !!!
+   - In order to do this, Proxy objects would need access to the current_process inside the listener process in order to know if the process is still alive.
+   - could we use a lookup table by ident?
+   - what about the case where a proxy object gets sent to another child process first and then a listener is spawned in a sibling process. how would we access the current_process() object?
+
+# 0.4.0
+ - Fixed (hopefully) garbage collection bug for Except's queue objects
+ - added utility to create segfaults - used for tests so we can be sure of how it will behave
+ - fixed deadlock where large items in queue would cause `util.process.join()` to hang
+   - this included adding a `mp.Event` that will wait for the process to return before joining.
+ - Proxy objects now identify the current process using the process ID (`.ident`) and set it using a mp.Value object.
+   - the reason for this is that storing strings in `mp.Value` was being such a hassle
+ - If `tblib` is installed, then it will be used to pickle exceptions passed by Except objects (which is used for exception handling and return values of `util.process` objects)
+   - also decided last minute to just add `tblib` as a dependency (it's small)
+ - add param: `Proxy.wait_until_listening(timeout=None)`
+ - added tests for large return values to `util.process`
+ - added segfault return test for `util.process`
 
 # 0.3.1
  - fix another race condition when closing a remote listener (wasn't preventing requesting processes from acquiring the lock if the process is no longer listening) god this is exhausting

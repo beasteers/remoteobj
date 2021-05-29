@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import remoteobj
 import pytest
 import multiprocessing as mp
+import remoteobj.util as u
 
 
 class ObjectA:
@@ -41,13 +42,18 @@ class ObjectB(ObjectA):
         return 10
 
 
+def segfault_after(secs=0):
+    secs and time.sleep(secs)
+    remoteobj.util.segfault()
+
+
 def test_get():
     '''Test remote get commands return the expected value.
 
     Checks: remoteobj.get(o), o.get_(), o.get_(default=...), o.__
     '''
     obj = ObjectB()
-    with remoteobj.util.listener(obj):
+    with remoteobj.util.listener(obj, wait_timeout=10):
         assert remoteobj.get(obj.remote.x) == obj.x
         assert obj.remote.x.get_() == obj.x
         assert obj.remote.x.__ == obj.x
@@ -65,13 +71,25 @@ def test_bg_listener(bg):
     Checks: Proxy.background_listen()
     '''
     obj = ObjectB()
-    with remoteobj.util.listener(obj, bg=bg):
+    with remoteobj.util.listener(obj, bg=bg, wait_timeout=10):
         assert obj.remote.x.__ == 10
 
     with pytest.raises(KeyError):
         with remoteobj.util.listener(obj, bg=bg):
             obj.remote.error()
 
+
+# @pytest.mark.parametrize("bg", [False, True])
+# def test_segfault(bg):
+#     '''Test that the background listener can respond to calls.
+
+#     Checks: Proxy.background_listen()
+#     '''
+#     obj = ObjectB()
+#     with remoteobj.util.listener(obj, bg=bg, callback=lambda o: segfault_after(1), wait_timeout=10) as p:
+#         while p.is_alive():
+#             assert p.is_alive() == obj.remote.listening_
+#         assert not obj.remote.listening_
 
 def test_attr():
     '''Test get, set, and del attribute.
@@ -80,7 +98,7 @@ def test_attr():
     '''
     obj = ObjectB()
     obj.y = 5
-    with remoteobj.util.listener(obj):
+    with remoteobj.util.listener(obj, wait_timeout=10):
         # remote setattr
         obj.remote.y = 6
         assert isinstance(obj.remote.y, remoteobj.Proxy)
@@ -118,7 +136,7 @@ def test_getset_item():
     Checks: o[x], o[x] = y, del o[x], x in o, len(o)
     '''
     obj = ObjectB()
-    with remoteobj.util.listener(obj):
+    with remoteobj.util.listener(obj, wait_timeout=10):
         assert 'a' in obj.remote.data
         assert obj.remote.data.passto(list) == ['a']
         assert obj.remote.data['a'].__ == 5
@@ -142,7 +160,7 @@ def test_chaining():
     Checks: return self -> value = SELF -> self if value == SELF
     '''
     obj = ObjectB()
-    with remoteobj.util.listener(obj):
+    with remoteobj.util.listener(obj, wait_timeout=10):
         assert obj.remote.chain() is obj.remote
         assert obj.remote.chain().chain() is obj.remote
 
@@ -155,7 +173,7 @@ def test_super():
     TODO: test multiple supers. I don't think this will work atm.
     '''
     obj = ObjectB()
-    with remoteobj.util.listener(obj):
+    with remoteobj.util.listener(obj, wait_timeout=10):
         assert obj.override() == obj.remote.override() == 10
         assert super(type(obj), obj).override() == obj.remote.super.override() == 2
 
@@ -166,14 +184,18 @@ def test_call():
     Checks: o(x), o.passto(x) (-> x(o))
     '''
     obj = ObjectB()
-    with remoteobj.util.listener(obj):
+    with remoteobj.util.listener(obj, wait_timeout=10):
         assert str(obj) == obj.remote.passto(str) == '<A x={}>'.format(obj.x)
 
 
 
-def _up_and_down(obj):
-    with obj.remote:
-        time.sleep(0.05)
+def _up_and_down(obj, t0=None):
+    t0 = time.time() or t0
+    with obj.remote.listen_():
+        u.mprint('a1', time.time() - t0)
+        time.sleep(0.1)
+        u.mprint('b1', time.time() - t0)
+    u.mprint('c1', time.time() - t0)
 
 def _exit_early(obj):
     pass
@@ -182,7 +204,7 @@ def _exit_early(obj):
 def test_wait_until_listening():
     obj = ObjectB()
     with remoteobj.util.process(_up_and_down, obj) as p:
-        assert obj.remote.wait_until_listening(p)
+        assert obj.remote.wait_until_listening()
 
 def test_wait_until_listening_fail():
     obj = ObjectB()
@@ -193,10 +215,14 @@ def test_wait_until_listening_fail():
 
 def test_fulfill_final():
     obj = ObjectB()
-    with remoteobj.util.process(_up_and_down, obj) as p:
-        assert obj.remote.wait_until_listening(p)
+    t0 = time.time()
+    with remoteobj.util.process(_up_and_down, obj, t0) as p:
+        u.mprint('a0', time.time() - t0)
+        assert obj.remote.wait_until_listening()
+        u.mprint('b0', time.time() - t0)
         assert obj.remote.x.get_(default=None) == 10
-        time.sleep(0.3)
+        u.mprint('c0', time.time() - t0)
+        time.sleep(0.2)
         assert not p.is_alive()  # should have exited on its own
 
     obj = ObjectB(fulfill_final=False)
@@ -209,11 +235,11 @@ def test_fulfill_final():
 
 def test_eager_proxy():
     obj = ObjectB()
-    with remoteobj.util.listener(obj):
+    with remoteobj.util.listener(obj, wait_timeout=10):
         assert isinstance(obj.remote.inc(), int)
 
     obj = ObjectB(eager_proxy=False)
-    with remoteobj.util.listener(obj):
+    with remoteobj.util.listener(obj, wait_timeout=10):
         assert isinstance(obj.remote.inc(), remoteobj.Proxy)
 
 
@@ -230,7 +256,7 @@ def _state_toggle_test(obj):
 def test_remote_clients():
     '''Determine if the remote instance can get data.'''
     obj = ObjectB()
-    with remoteobj.util.listener(obj):
+    with remoteobj.util.listener(obj, wait_timeout=10):
         assert obj.remote.x.__ == 10
         with remoteobj.util.process(_state_toggle_test, obj) as p:
             pass
@@ -291,7 +317,7 @@ def test_dueling_threads():
     obj.catch_ = remoteobj.Except()
 
     assert obj.remote.listening_ == False
-    with remoteobj.util.listener(obj):
+    with remoteobj.util.listener(obj, wait_timeout=10):
         assert obj.remote.listening_ == True
 
         with remote_func(_do_work, obj, 'boolean', bool) as (p, c1):

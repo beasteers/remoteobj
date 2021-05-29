@@ -250,30 +250,43 @@ class LocalExcept:
 #         '__lookup': look, '__getstate__': __getstate__, '__setstate__': __setstate__
 #     })
 
+tblib = None
+try:
+    import tblib
+    import tblib.pickling_support
+except ImportError:
+    pass
+import weakref
+import warnings
 class Except(LocalExcept):
     '''Catch exceptions in a remote process with their traceback and send them
     back to be raised properly in the main process.'''
     __Qs = {}
-    def __init__(self, *types, store_remote=True, **kw):
-        # self._local, self._remote = mp.Pipe()
-        self._q = mp.Queue()
+    _Q_USE_WEAKREF = True
+    def __init__(self, *types, store_remote=True, manager=mp, **kw):
+        # self._local, self._remote = manager.Pipe()
+        self._q = manager.Queue()
         self._q_id = id(self._q)
-        self.__Qs[self._q_id] = self._q
+        self.__Qs[self._q_id] = weakref.ref(self._q) if self._Q_USE_WEAKREF else self._q
+        # print(set(self.__Qs), self._q_id, mp.current_process().name)
         self._store_remote = store_remote
-        # self._local_name = mp.current_process().name
+        self._local_name = mp.current_process().name
         super().__init__(*types, **kw)
 
     ### these methods are to prevent queues from being pickled
 
     def __getstate__(self):
+        # print(self.name, set(self.__Qs), self._q_id, mp.current_process().name)
         return dict(self.__dict__, _q=None)
 
     def __setstate__(self, state):
         self.__dict__ = state
-        self._q = self.__Qs[self._q_id]
-
-    def __del__(self):
-        self.__Qs.pop(self._q_id, None)
+        self._q = q = self.__Qs.get(self._q_id)
+        if self._Q_USE_WEAKREF and q is not None:
+            self._q = self._q()
+        if self._q is None:
+            warnings.warn('Queue for {} has been garbage collected and is no longer available. Creating a new one.'.format(self))
+            self._q = manager.Queue()
 
     #########
 
@@ -302,6 +315,14 @@ class Except(LocalExcept):
             super().set(exc, name, mark=mark)
         elif mark and name not in RESULT_KEYS:
             self._mark(exc, name)
+
+    def _wrap_value(self, x):
+        if isinstance(x, BaseException):
+            if tblib is None:
+                return RemoteException(x)
+            tblib.pickling_support.install(type(x))
+        return x
+
 
     def get_result(self, **kw):
         self.pull()
